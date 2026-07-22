@@ -1,8 +1,9 @@
 # Current implementation testing
 
 Status snapshot: **2026-07-21**. This document inventories executable evidence
-for the repository as it exists now, with particular attention to migration 0004
-and `server/src/planning`. It complements the release-oriented
+for the repository as it exists now, with particular attention to planning
+migration 0004, scheduler-index migration 0005, and `server/src/planning`. It
+complements the release-oriented
 `TEST-STRATEGY.md`; it does not upgrade a feature from specified or implemented
 to verified merely because a unit test exists.
 
@@ -46,10 +47,11 @@ evidence.
 
 | Artifact | What is exercised | Evidence boundary |
 |---|---|---|
-| `server/tests/planning.test.ts` | Availability Boundary after-hours output; Smart Meeting deterministic closest opening, full-window unmet result, missing required-attendee warning, no past start; backward-window rejection and clock normalization/defaults | Seven example tests against the pure engine/parser; no property corpus, DST transition matrix, coordinator, database, or provider I/O |
+| `server/tests/planning.test.ts` | Availability Boundary after-hours output; Smart Meeting deterministic closest opening, full-window unmet result, missing required-attendee warning, no past start; backward-window rejection and clock normalization/defaults; semantic preview snapshots ignore refresh metadata, detect Busy/capability/readiness changes, and normalize calendar/interval order | Eleven example tests against the pure engine/parser/snapshot document; no property corpus, DST transition matrix, coordinator, database, or provider I/O |
 | `server/tests/api.test.ts` | Authenticated/CSRF-protected preview and activation route delegation and response codes | Dependencies are mocked; no parser error matrix, preview persistence/staleness, lifecycle routes, ownership, rate limiting, or PostgreSQL transaction evidence |
-| `server/tests/provider.test.ts` | Smart Meeting Google serialization with attendees and separate private markers; fake timeout-after-create followed by ownership readback | Serializer/fake adapter evidence only; no live invitations, update/delete notification observation, ETag conflict matrix, or recipient behavior |
-| `server/tests/migration.test.ts` | Migration text contains the planning tables/kinds/occurrence uniqueness and does not reference bridge policy/projection tables | Text inspection only; migration is not applied to real PostgreSQL and constraints/state transitions are not exercised |
+| `server/tests/provider.test.ts` | Smart Meeting Google serialization with attendees and separate private markers; fake timeout-after-create followed by ownership readback; same-calendar/same-event-ID isolation across fake tokens for discovery, bridge events, and planning events | Serializer/fake adapter evidence only; no live invitations, update/delete notification observation, ETag conflict matrix, or recipient behavior |
+| `server/tests/migration.test.ts` | Migration text contains the planning tables/kinds/occurrence uniqueness, planner/bridge separation, and the non-partial retained-job lookup index | Text inspection only; the opt-in PostgreSQL suite supplies actual migration execution |
+| `server/tests/postgres.integration.test.ts` | Applies migrations 0001–0005 in an isolated schema; distinguishes and concurrently exercises historical-window `enqueueOnce` versus repeatable active-only enqueue; repairs an unreferenced legacy fake cross-account endpoint; exercises the existing bridge lifecycle/recovery suite | Opt-in real-PostgreSQL evidence; it still does not construct `PlanningService`/`PlanningCoordinator` or execute planning provider effects |
 
 The broader calendar-sync tests provide useful primitives—interval handling,
 provider error mapping, queue behavior, bridge reconciliation, privacy transforms
@@ -59,9 +61,11 @@ markers, attendee payloads, and notification semantics.
 
 ## Critical untested paths
 
-There is currently no PlanningService or PlanningCoordinator test against real
-PostgreSQL, and no planning lifecycle test through a real scheduler/worker. The
-highest-risk missing evidence is:
+There is currently no automated PlanningService or PlanningCoordinator test
+against real PostgreSQL and no repeatable planning lifecycle regression through
+a real scheduler/worker. A manual credential-free vertical slice passed and is
+recorded in `docs/evidence/2026-07-21-planning-browser-verification.md`; it does
+not replace the following highest-risk automated/live evidence:
 
 1. preview creation/expiry/consumption, canonical snapshot hashing, stale conflict,
    concurrent activation, rollback, and replay;
@@ -106,7 +110,7 @@ highest-risk missing evidence is:
 
 ### P0: correctness and notification safety
 
-- Add a disposable PostgreSQL fixture that applies migrations 0001–0004 and
+- Add a disposable PostgreSQL fixture that applies migrations 0001–0005 and
   constructs PlanningService/PlanningCoordinator with the fake provider.
 - Reproduce pause-with-pending-apply then resume; require a new apply job and
   convergence. Require active target-unavailable recovery, explicit

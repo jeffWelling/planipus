@@ -135,8 +135,10 @@ not turn an unfinished bridge into a release.
 - [!] Expose the Google planning-write gate through capabilities and Protect/Meet
       UI. When disabled, do not imply that activation created provider events;
       show pending local intent and operator guidance instead.
-- [!] Run a real-PostgreSQL/browser/worker planning flow, then live Google fence
-      and Smart Meeting suites covering ordinary-viewer privacy, zero fence mail,
+- [~] The real-PostgreSQL/compiled-browser/worker fake-provider flow now passes:
+      15 fence blocks and five Smart Meetings converged while an elapsed-window
+      occurrence stayed explicitly unmet. Still run live Google fence and Smart
+      Meeting suites covering ordinary-viewer privacy, zero fence mail,
       invitations/updates, external attendees, RSVP, suggestions, explicit
       auto-move, pause/replan, DST, quota and failure recovery.
 - [ ] Complete Protect/Meet keyboard, screen-reader, high-zoom, responsive,

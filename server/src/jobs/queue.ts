@@ -1,4 +1,4 @@
-import type { Kysely, Transaction, Updateable } from "kysely";
+import { sql, type Kysely, type Transaction, type Updateable } from "kysely";
 
 import { newId, safeErrorCode } from "../foundation.js";
 import type { DatabaseSchema, ScheduledJobTable } from "../database/types.js";
@@ -24,9 +24,7 @@ export class PostgresJobQueue {
     runAfter = new Date(),
     executor: DbExecutor = this.db
   ): Promise<string | null> {
-    if (payload === null || typeof payload !== "object") {
-      throw new TypeError("scheduled job payload must be a JSON object or array");
-    }
+    assertJobPayload(payload);
     const id = newId();
     const inserted = await executor
       .insertInto("scheduled_jobs")
@@ -47,6 +45,39 @@ export class PostgresJobQueue {
       .returning("id")
       .executeTakeFirst();
     return inserted?.id ?? null;
+  }
+
+  /** Keep a time-windowed job from being recreated after it has completed.
+   * The transaction-scoped advisory lock serializes the same historical key
+   * across scheduler replicas; the non-partial lookup index keeps the check
+   * bounded across retained terminal rows. */
+  public async enqueueOnce(
+    organizationId: string,
+    kind: string,
+    dedupeKey: string,
+    payload: unknown,
+    runAfter = new Date(),
+    executor?: Transaction<DatabaseSchema>
+  ): Promise<string | null> {
+    assertJobPayload(payload);
+    const enqueueInTransaction = async (
+      transaction: Transaction<DatabaseSchema>
+    ): Promise<string | null> => {
+      const lockIdentity = JSON.stringify([organizationId, kind, dedupeKey]);
+      await sql`select pg_advisory_xact_lock(hashtextextended(${lockIdentity}, 0))`
+        .execute(transaction);
+      const existing = await transaction.selectFrom("scheduled_jobs")
+        .select("id")
+        .where("organization_id", "=", organizationId)
+        .where("kind", "=", kind)
+        .where("dedupe_key", "=", dedupeKey)
+        .executeTakeFirst();
+      if (existing) return null;
+      return this.enqueue(organizationId, kind, dedupeKey, payload, runAfter, transaction);
+    };
+    return executor
+      ? enqueueInTransaction(executor)
+      : this.db.transaction().execute(enqueueInTransaction);
   }
 
   public async lease(owner: string, limit: number, leaseSeconds: number): Promise<readonly LeasedJob[]> {
@@ -138,5 +169,11 @@ export class PostgresJobQueue {
     if (Number(result.numUpdatedRows) !== 1) {
       throw new Error("job lease was lost before transition");
     }
+  }
+}
+
+function assertJobPayload(payload: unknown): asserts payload is object {
+  if (payload === null || typeof payload !== "object") {
+    throw new TypeError("scheduled job payload must be a JSON object or array");
   }
 }

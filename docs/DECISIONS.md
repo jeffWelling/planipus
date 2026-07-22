@@ -22,6 +22,25 @@ The autonomous-edition decision still applies. Current planning features exist
 only on Server. Mac does not gain them through a Server connection; it needs a
 separate native requirement, Swift implementation, and live evidence.
 
+## 2026-07-21 — Preview staleness follows scheduling semantics
+
+An immutable preview must become stale when the inputs that can change its
+outcome change—not whenever provider bookkeeping is refreshed. Planning
+snapshot hashes therefore include target/availability capabilities, the ready
+availability-calendar set, and sorted derived Busy intervals. They exclude
+endpoint/cursor timestamps, non-scheduling event content, and planned-event
+write status when desired Busy timing is unchanged.
+
+Activation still rechecks capability/readiness and rejects changed Busy time.
+This preserves the review-before-write contract without creating an impossible
+race against ordinary discovery heartbeats or worker convergence.
+
+Test fakes must preserve the same account boundary. Fake provider calendars,
+observations, bridge events, and planning events are scoped by
+connection-specific tokens; shared global provider state is prohibited because
+it can manufacture cross-account capabilities or mutations that Google would
+never return.
+
 ## 2026-07-21 — Protected Hours and availability fences are different controls
 
 Working/Meeting/Personal/Custom/one-off Hours are reusable scheduling policy.

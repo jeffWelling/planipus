@@ -9,8 +9,11 @@ import type { DesiredCopy, SourceObservation } from "@planipus/calendar-sync";
 
 import { runMigrations } from "../src/database/migrate.js";
 import type { DatabaseSchema } from "../src/database/types.js";
+import { PostgresJobQueue } from "../src/jobs/queue.js";
 import { sharedPolicyRuntime } from "../src/policy/runtime.js";
 import { PolicyService, type PolicyDraft } from "../src/policy/service.js";
+import { repairFakeDemoCrossAccountEndpoints } from "../src/providers/fake-demo-repair.js";
+import { fakeAccessTokenForConnection } from "../src/providers/fake-token.js";
 import { FakeCalendarProvider } from "../src/providers/fake.js";
 import { FakeAccessTokenBroker, ProviderRouter } from "../src/providers/router.js";
 import { ProviderError, type ProviderWriteResult } from "../src/providers/types.js";
@@ -73,11 +76,65 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
       expect(migrations.rows.map((row) => row.name)).toContain("0001_initial.sql");
       expect(migrations.rows.map((row) => row.name)).toContain("0002_destination_verification.sql");
       expect(migrations.rows.map((row) => row.name)).toContain("0003_recovery_basis.sql");
+      expect(migrations.rows.map((row) => row.name)).toContain("0004_planning_rules.sql");
+      expect(migrations.rows.map((row) => row.name))
+        .toContain("0005_scheduled_job_history_lookup.sql");
+
+      const jobs = new PostgresJobQueue(database);
+      const windowJobId = await jobs.enqueueOnce(
+        ORGANIZATION_ID,
+        "test_window",
+        "test-window:1",
+        { fixture: true }
+      );
+      expect(windowJobId).not.toBeNull();
+      await database.updateTable("scheduled_jobs").set({ state: "succeeded" })
+        .where("id", "=", windowJobId!)
+        .executeTakeFirstOrThrow();
+      await expect(jobs.enqueueOnce(
+        ORGANIZATION_ID,
+        "test_window",
+        "test-window:1",
+        { fixture: true }
+      )).resolves.toBeNull();
+      await expect(jobs.enqueue(
+        ORGANIZATION_ID,
+        "test_window",
+        "test-window:1",
+        { fixture: true }
+      )).resolves.not.toBeNull();
+      const concurrentWindowJobs = await Promise.all([
+        jobs.enqueueOnce(
+          ORGANIZATION_ID,
+          "test_window",
+          "test-window:concurrent",
+          { scheduler: "one" }
+        ),
+        jobs.enqueueOnce(
+          ORGANIZATION_ID,
+          "test_window",
+          "test-window:concurrent",
+          { scheduler: "two" }
+        )
+      ]);
+      expect(concurrentWindowJobs.filter((id) => id !== null)).toHaveLength(1);
+      const concurrentRows = await database.selectFrom("scheduled_jobs")
+        .select("id")
+        .where("kind", "=", "test_window")
+        .where("dedupe_key", "=", "test-window:concurrent")
+        .execute();
+      expect(concurrentRows).toHaveLength(1);
+      await database.deleteFrom("scheduled_jobs")
+        .where("kind", "=", "test_window")
+        .execute();
 
       const sourceConnectionId = randomUUID();
       const destinationConnectionId = randomUUID();
+      const sourceToken = fakeAccessTokenForConnection(sourceConnectionId);
+      const destinationToken = fakeAccessTokenForConnection(destinationConnectionId);
       const sourceCalendarId = randomUUID();
       const destinationCalendarId = randomUUID();
+      const staleCrossAccountCalendarId = randomUUID();
       const sourceObservationId = randomUUID();
       const sourceObservation = sourceEventForTomorrow();
 
@@ -154,9 +211,34 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
                 conference_copy: false,
                 color: true
               }
+            },
+            {
+              id: staleCrossAccountCalendarId,
+              organization_id: ORGANIZATION_ID,
+              connection_id: sourceConnectionId,
+              remote_id: "destination-primary",
+              name: "Cross-injected Work",
+              timezone: "UTC",
+              access_role: "owner",
+              readable: false,
+              writable: false,
+              primary_calendar: false,
+              capabilities: {}
             }
           ])
           .execute();
+
+        await expect(repairFakeDemoCrossAccountEndpoints(transaction, {
+          sourceConnectionId,
+          destinationConnectionId,
+          sourceCalendarId,
+          destinationCalendarId,
+          sourceRemoteId: "source-primary",
+          destinationRemoteId: "destination-primary"
+        })).resolves.toBe(1);
+        await expect(transaction.selectFrom("calendar_endpoints").select("id")
+          .where("id", "=", staleCrossAccountCalendarId)
+          .executeTakeFirst()).resolves.toBeUndefined();
 
         await transaction
           .insertInto("source_observations")
@@ -292,7 +374,7 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
         state: "retry",
         safe_error_code: "policy_paused"
       });
-      await expect(fakeProvider.getEvent("token", "destination-primary", initialEventId))
+      await expect(fakeProvider.getEvent(destinationToken, "destination-primary", initialEventId))
         .resolves.toBeNull();
       await policies.setPaused(ORGANIZATION_ID, PRINCIPAL_ID, activated.id, false);
 
@@ -343,7 +425,7 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
         .where("id", "=", activated.id)
         .executeTakeFirstOrThrow();
       expect(pausedAfterWrite.status).toBe("paused");
-      await expect(fakeProvider.getEvent("token", "destination-primary", initialEventId))
+      await expect(fakeProvider.getEvent(destinationToken, "destination-primary", initialEventId))
         .resolves.toMatchObject({
           remoteRevision: "1",
           managedIdentity: {
@@ -431,7 +513,7 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
         state: "succeeded",
         safe_error_code: "recovery_basis_changed"
       });
-      expect(await fakeProvider.getEvent("token", "destination-primary", initialEventId))
+      expect(await fakeProvider.getEvent(destinationToken, "destination-primary", initialEventId))
         .toMatchObject({ remoteRevision: "1" });
       expect(fakeProvider.desired("destination-primary", initialEventId)?.timing)
         .toEqual(sourceObservation.timing);
@@ -495,11 +577,11 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
         .where("id", "=", tombstoneObservationId)
         .executeTakeFirstOrThrow();
       expect(await effects.runBatch("postgres-integration-worker", 10, 60)).toBe(1);
-      await expect(fakeProvider.getEvent("token", "destination-primary", tombstoneEventId))
+      await expect(fakeProvider.getEvent(destinationToken, "destination-primary", tombstoneEventId))
         .resolves.toBeNull();
       expect((await reconciler.reconcile(ORGANIZATION_ID, activated.id)).effectsCreated).toBe(1);
       expect(await effects.runBatch("postgres-integration-worker", 10, 60)).toBe(1);
-      await expect(fakeProvider.getEvent("token", "destination-primary", tombstoneEventId))
+      await expect(fakeProvider.getEvent(destinationToken, "destination-primary", tombstoneEventId))
         .resolves.toBeNull();
       const deletedTombstoneProjection = await database
         .selectFrom("projections")
@@ -568,9 +650,9 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
       });
       expect(racedEffects.at(-1)).toMatchObject({ operation: "create", state: "pending" });
       expect(await effects.runBatch("postgres-integration-worker", 10, 60)).toBe(1);
-      await expect(fakeProvider.getEvent("token", "destination-primary", initialEventId))
+      await expect(fakeProvider.getEvent(destinationToken, "destination-primary", initialEventId))
         .resolves.toBeNull();
-      await expect(fakeProvider.getEvent("token", "destination-primary", racedReplacementEventId))
+      await expect(fakeProvider.getEvent(destinationToken, "destination-primary", racedReplacementEventId))
         .resolves.toMatchObject({
           managedIdentity: {
             policyRef: activated.id,
@@ -603,9 +685,9 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
       expect(replacementDesired.provenance.generation).toBe(3);
       expect(replacementProjection.desired_hash).toBe(sharedPolicyRuntime.hash(replacementDesired));
       expect(await effects.runBatch("postgres-integration-worker", 10, 60)).toBe(1);
-      await expect(fakeProvider.getEvent("token", "destination-primary", racedReplacementEventId))
+      await expect(fakeProvider.getEvent(destinationToken, "destination-primary", racedReplacementEventId))
         .resolves.toBeNull();
-      await expect(fakeProvider.getEvent("token", "destination-primary", replacementEventId))
+      await expect(fakeProvider.getEvent(destinationToken, "destination-primary", replacementEventId))
         .resolves.toMatchObject({
           managedIdentity: {
             policyRef: activated.id,
@@ -662,7 +744,7 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
         ownership: "ambiguous",
         ...heldEvidenceBeforeReconcile
       });
-      await expect(fakeProvider.getEvent("token", "destination-primary", replacementEventId))
+      await expect(fakeProvider.getEvent(destinationToken, "destination-primary", replacementEventId))
         .resolves.toMatchObject({ managedIdentity: null, remoteRevision: "1" });
 
       // Explicit recovery never assumes that the user fixed the collision: it
@@ -724,7 +806,7 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
         status: "held",
         ownership: "ambiguous"
       });
-      await expect(fakeProvider.getEvent("token", "destination-primary", replacementEventId))
+      await expect(fakeProvider.getEvent(destinationToken, "destination-primary", replacementEventId))
         .resolves.toMatchObject({ managedIdentity: null });
 
       fakeProvider.simulateManualDelete("destination-primary", replacementEventId);
@@ -768,7 +850,7 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
         status: "converged",
         ownership: "attached"
       });
-      await expect(fakeProvider.getEvent("token", "destination-primary", recoveredEventId))
+      await expect(fakeProvider.getEvent(destinationToken, "destination-primary", recoveredEventId))
         .resolves.toMatchObject({
           managedIdentity: {
             policyRef: activated.id,
@@ -780,7 +862,7 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
       // A new cursor fingerprint must start above every existing observation
       // generation. Otherwise an empty full scan cannot tombstone rows left by
       // an older fingerprint whose generation is equal to or greater than 1.
-      fakeProvider.setObservations("source-primary", []);
+      fakeProvider.setObservations("source-primary", [], sourceToken);
       const currentQueryFingerprint = calendarSyncQueryFingerprint(
         sharedPolicyRuntime,
         "fake",

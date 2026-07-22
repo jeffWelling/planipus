@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { planScheduling } from "../src/planning/engine.js";
+import { planningSnapshotDocument } from "../src/planning/service.js";
 import type { AvailabilityBoundaryDraft, SmartMeetingDraft } from "../src/planning/types.js";
 import { parsePlanningDraft, PlanningInputError } from "../src/planning/validation.js";
 
@@ -157,5 +158,82 @@ describe("planning input validation", () => {
       workday_end: "17:00:00",
       protect_after_work: true
     });
+  });
+});
+
+describe("planning preview snapshots", () => {
+  const target = {
+    id: "work-calendar",
+    writable: true,
+    status: "active",
+    intended_role: "destination",
+    updated_at: new Date("2026-07-20T16:00:00.000Z")
+  };
+  const calendar = {
+    id: "owner-calendar",
+    readable: true,
+    status: "active",
+    updated_at: new Date("2026-07-20T16:00:00.000Z")
+  };
+  const state = {
+    target,
+    calendars: [calendar],
+    knownAvailabilityCalendarIds: [calendar.id],
+    busy: [{
+      calendar_id: calendar.id,
+      start: "2026-07-21T16:00:00.000Z",
+      end: "2026-07-21T17:00:00.000Z"
+    }]
+  };
+
+  it("does not invalidate a preview for provider refresh timestamps alone", () => {
+    const refreshed = {
+      ...state,
+      target: { ...target, updated_at: new Date("2026-07-20T16:05:00.000Z") },
+      calendars: [{ ...calendar, updated_at: new Date("2026-07-20T16:05:00.000Z") }]
+    };
+
+    expect(planningSnapshotDocument(refreshed)).toEqual(planningSnapshotDocument(state));
+  });
+
+  it("does invalidate a preview when planning-relevant availability changes", () => {
+    const changed = {
+      ...state,
+      busy: [{ ...state.busy[0]!, end: "2026-07-21T17:30:00.000Z" }]
+    };
+
+    expect(planningSnapshotDocument(changed)).not.toEqual(planningSnapshotDocument(state));
+  });
+
+  it("tracks target capabilities and the ready availability-calendar set", () => {
+    expect(planningSnapshotDocument({
+      ...state,
+      target: { ...target, writable: false }
+    })).not.toEqual(planningSnapshotDocument(state));
+    expect(planningSnapshotDocument({
+      ...state,
+      knownAvailabilityCalendarIds: []
+    })).not.toEqual(planningSnapshotDocument(state));
+  });
+
+  it("normalizes calendar and busy interval order before hashing", () => {
+    const extra = {
+      calendar_id: calendar.id,
+      start: "2026-07-22T16:00:00.000Z",
+      end: "2026-07-22T17:00:00.000Z"
+    };
+    const extraCalendar = { ...calendar, id: "team-calendar" };
+
+    expect(planningSnapshotDocument({
+      ...state,
+      calendars: [extraCalendar, ...state.calendars],
+      knownAvailabilityCalendarIds: [extraCalendar.id, ...state.knownAvailabilityCalendarIds],
+      busy: [extra, ...state.busy]
+    })).toEqual(planningSnapshotDocument({
+      ...state,
+      calendars: [...state.calendars, extraCalendar],
+      knownAvailabilityCalendarIds: [...state.knownAvailabilityCalendarIds, extraCalendar.id],
+      busy: [...state.busy, extra]
+    }));
   });
 });

@@ -79,10 +79,12 @@ continuously only while its own Kubernetes workload is healthy.
   observations. It excludes past slots, reports unmet occurrences instead of
   scheduling outside the window, and warns when a required attendee's
   availability is unknown.
-- Planning preview/activation uses an availability snapshot hash and rejects a
-  stale preview. Planned provider events use distinct ownership markers and
-  durable jobs, with create/update/delete primitives, pause/resume, manual and
-  scheduled replanning, safe ownership holds, and suggestion expiry.
+- Planning preview/activation uses a semantic availability snapshot hash and
+  rejects a stale preview. The hash follows capabilities, readiness, and sorted
+  Busy intervals—not provider refresh timestamps, title-only changes, or
+  pending/converged bookkeeping. Planned provider events use distinct ownership
+  markers and durable jobs, with create/update/delete primitives, pause/resume,
+  manual and scheduled replanning, safe ownership holds, and suggestion expiry.
 - Smart Meeting preparation now requires a `ready` sync cursor with a success in
   the prior 30 minutes for every selected availability calendar. Other active
   Smart Meeting planned events count as Busy. An observed Google event carrying
@@ -109,6 +111,10 @@ continuously only while its own Kubernetes workload is healthy.
   writes are disabled by default and require
   `PLANIPUS_EXPERIMENTAL_GOOGLE_PLANNING=true`; the live invitation lifecycle
   gate has not passed.
+- Fake-provider discovery, observations, bridge events, and planning events are
+  connection-scoped, matching the real provider trust boundary. The idempotent
+  demo seed restores canonical Personal/Work capabilities and safely removes
+  only unreferenced endpoint shapes created by the former cross-account bug.
 - Helm solo and standard profiles, separate API/scheduler/worker processes,
   bounded migration retry, CI, source-only Cloud Native Buildpacks output, and
   operational examples. Solo PostgreSQL is loopback-only and initializes a
@@ -154,9 +160,10 @@ continuously only while its own Kubernetes workload is healthy.
 ## Verification status
 
 The implementation is credential-free and pre-release. On 2026-07-21 the
-current worktree's Node test command passed 96 shared tests and 70 Server tests;
+current worktree's Node test command passed 96 shared tests and 76 Server tests;
 one opt-in Server integration test was skipped by its normal environment gate.
-The separately run isolated-schema PostgreSQL test previously passed. The
+The same current worktree's separately run isolated-schema PostgreSQL test
+passed. The
 integrated native baseline passed 58 Swift tests and a release build. The listed
 credential-free compiled Server UI
 flow—login, two fake accounts, hours/privacy preview, activation, Sync Now,
@@ -165,9 +172,12 @@ no browser console errors. Exact procedures and the two database-only defects
 found/fixed are in `docs/evidence/2026-07-21-build-verification.md`.
 
 The planning alpha has credential-free engine, API, validation, migration, and
-provider-serialization tests, but no live-provider evidence. It has not written
-an availability fence or Smart Meeting to Google. Its current limits are
-material:
+provider-serialization tests plus a compiled-browser/PostgreSQL/scheduler/worker
+fake-provider walkthrough: 15 fence blocks and five Smart Meetings converged,
+and one elapsed-window meeting remained explicitly unmet. Details are in
+`docs/evidence/2026-07-21-planning-browser-verification.md`. There is still no
+live-provider evidence. Planipus has not written an availability fence or Smart
+Meeting to Google. Its current limits are material:
 
 - planning Hours are copied into each rule; reusable named Hours, multiple daily
   ranges, and date exceptions are not yet exposed;

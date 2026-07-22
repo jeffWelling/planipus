@@ -3,6 +3,7 @@ import { ProviderError } from "./types.js";
 import type { Kysely } from "kysely";
 
 import type { DatabaseSchema } from "../database/types.js";
+import { fakeAccessTokenForConnection } from "./fake-token.js";
 
 export interface AccessTokenBroker {
   accessToken(organizationId: string, connectionId: string): Promise<string>;
@@ -26,8 +27,8 @@ export class ProviderRouter {
 }
 
 export class FakeAccessTokenBroker implements AccessTokenBroker {
-  public async accessToken(_organizationId: string, _connectionId: string): Promise<string> {
-    return "fake-access-token";
+  public async accessToken(_organizationId: string, connectionId: string): Promise<string> {
+    return fakeAccessTokenForConnection(connectionId);
   }
 }
 

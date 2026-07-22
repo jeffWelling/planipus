@@ -239,6 +239,19 @@ export interface ScheduledJobTable {
   updated_at: GeneratedTimestamp;
 }
 
+export interface ProviderSubscriptionTable {
+  id: string;
+  organization_id: string;
+  calendar_endpoint_id: string;
+  channel_id: string;
+  resource_id: string | null;
+  token_hash: string;
+  expires_at: Timestamp | null;
+  status: string;
+  created_at: GeneratedTimestamp;
+  updated_at: GeneratedTimestamp;
+}
+
 export interface AuditFactTable {
   id: string;
   organization_id: string;
@@ -349,6 +362,7 @@ export interface DatabaseSchema {
   projections: ProjectionTable;
   outbox_effects: OutboxEffectTable;
   scheduled_jobs: ScheduledJobTable;
+  provider_subscriptions: ProviderSubscriptionTable;
   audit_facts: AuditFactTable;
   planning_previews: PlanningPreviewTable;
   planning_rules: PlanningRuleTable;

@@ -101,7 +101,7 @@ describe("destination verification", () => {
 
   it("never treats an event occupying the deterministic ID as owned by ID alone", async () => {
     const provider = new FakeCalendarProvider();
-    provider.setUnmanagedEvent("work", "pmanaged1");
+    provider.setUnmanagedEvent("work", "pmanaged1", "token");
     const observed = await provider.getEvent("token", "work", "pmanaged1");
     expect(classifyDestinationVerification(target, observed)).toMatchObject({
       kind: "ownership_mismatch"

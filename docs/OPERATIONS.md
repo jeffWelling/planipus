@@ -175,6 +175,9 @@ restart loop during a recoverable provider outage.
 Migration `0004_planning_rules.sql` adds Availability Boundary and Smart Meeting
 runtime state. The same `api`, `scheduler`, and `worker` processes serve it; no
 separate planner service, cache, controller, or Kubernetes resource exists.
+Migration `0005_scheduled_job_history_lookup.sql` adds the non-partial lookup
+index used by historically deduplicated scheduler windows; it does not replace
+the active-only unique index required by repeatable source sync.
 
 Fake-provider mode exposes planning for deterministic local use. Google mode
 keeps the planning API and writes disabled unless
@@ -186,9 +189,19 @@ job becomes dead rather than implying success.
 
 - API preview computes synchronously and stores a ten-minute preview. Activation
   consumes a still-current preview and atomically creates a rule, planned-event
-  rows, audit record, and PostgreSQL scheduled jobs.
+  rows, audit record, and PostgreSQL scheduled jobs. Staleness is bound to
+  planning-semantic capabilities/readiness/Busy intervals; discovery timestamps,
+  title-only observation edits, and pending-to-converged bookkeeping do not
+  invalidate a preview.
 - The scheduler's default tick is fifteen seconds. Each active rule receives at
-  most one active reconciliation job per fifteen-minute deduplication window.
+  most one reconciliation job, including completed history, per fifteen-minute
+  deduplication window. Discovery and destination verification use the same
+  historical-window rule. A transaction-scoped advisory lock serializes the
+  same key across scheduler replicas and migration 0005 indexes the retained
+  history lookup. Lock-producing organization/resource collections are ordered
+  by stable IDs before acquisition so replicas cannot deadlock by traversing the
+  same set differently. Constant-key source sync deliberately retains
+  active-only deduplication so it can run again after completion.
   It also expires pending planning suggestions after fourteen days and deletes
   previews only after they have been expired for seven days.
 - The worker polls by default every second, leases up to twenty scheduled jobs

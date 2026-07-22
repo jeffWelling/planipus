@@ -12,6 +12,9 @@ Expected paths:
   so the decision change remains inspectable;
 - `2026-07-21-build-verification.md` — first credential-free implementation,
   real-PostgreSQL/browser/worker evidence, defects found, and open boundary;
+- `2026-07-21-planning-browser-verification.md` — Protect and Smart Meeting
+  compiled-UI/PostgreSQL/worker walkthrough, defects found/fixed, and the exact
+  fake-versus-live evidence boundary;
 - `2026-07-21-claude-opus-review.md` — review request, authentication/privacy
   blocker, exact continuation procedure, and (once authorized) independent
   read-only review plus prioritized follow-up;

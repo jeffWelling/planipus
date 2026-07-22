@@ -5,6 +5,10 @@ import { describe, expect, it } from "vitest";
 const migrationUrl = new URL("../migrations/0001_initial.sql", import.meta.url);
 const recoveryBasisMigrationUrl = new URL("../migrations/0003_recovery_basis.sql", import.meta.url);
 const planningMigrationUrl = new URL("../migrations/0004_planning_rules.sql", import.meta.url);
+const jobHistoryMigrationUrl = new URL(
+  "../migrations/0005_scheduled_job_history_lookup.sql",
+  import.meta.url
+);
 
 describe("initial PostgreSQL schema", () => {
   it("contains the durable idempotency and tenant integrity constraints", async () => {
@@ -46,5 +50,12 @@ describe("initial PostgreSQL schema", () => {
     expect(sql).toContain("unique (rule_id, occurrence_key)");
     expect(sql).not.toContain("references sync_policies");
     expect(sql).not.toContain("references projections");
+  });
+
+  it("indexes retained job history for time-window deduplication", async () => {
+    const sql = await readFile(fileURLToPath(jobHistoryMigrationUrl), "utf8");
+    expect(sql).toContain("create index scheduled_jobs_history_dedupe_idx");
+    expect(sql).toContain("scheduled_jobs (organization_id, kind, dedupe_key)");
+    expect(sql).not.toContain("create unique index");
   });
 });

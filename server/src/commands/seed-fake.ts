@@ -10,6 +10,7 @@ import {
 } from "../foundation.js";
 import { sharedPolicyRuntime } from "../policy/runtime.js";
 import { reportFatal } from "../process.js";
+import { repairFakeDemoCrossAccountEndpoints } from "../providers/fake-demo-repair.js";
 import { calendarSyncQueryFingerprint } from "../sync/query.js";
 
 const SOURCE_CONNECTION_ID = "00000000-0000-7000-8000-000000000010";
@@ -37,6 +38,7 @@ async function main(): Promise<void> {
       "fake",
       "fake-personal-primary"
     );
+    let repairedEndpointCount = 0;
     await database.db.transaction().execute(async (transaction) => {
       await transaction
         .insertInto("provider_connections")
@@ -78,6 +80,22 @@ async function main(): Promise<void> {
         ])
         .onConflict((conflict) => conflict.column("id").doNothing())
         .execute();
+      await transaction.updateTable("provider_connections").set({
+        display_label: "Personal demo",
+        intended_role: "source",
+        status: "active",
+        last_success_at: now,
+        safe_error_code: null,
+        updated_at: now
+      }).where("id", "=", SOURCE_CONNECTION_ID).executeTakeFirstOrThrow();
+      await transaction.updateTable("provider_connections").set({
+        display_label: "Work demo",
+        intended_role: "destination",
+        status: "active",
+        last_success_at: now,
+        safe_error_code: null,
+        updated_at: now
+      }).where("id", "=", DESTINATION_CONNECTION_ID).executeTakeFirstOrThrow();
       await transaction
         .insertInto("calendar_endpoints")
         .values([
@@ -114,6 +132,42 @@ async function main(): Promise<void> {
         ])
         .onConflict((conflict) => conflict.column("id").doNothing())
         .execute();
+      await transaction.updateTable("calendar_endpoints").set({
+        connection_id: SOURCE_CONNECTION_ID,
+        remote_id: "fake-personal-primary",
+        name: "Personal",
+        timezone: "America/Vancouver",
+        access_role: "reader",
+        readable: true,
+        writable: false,
+        primary_calendar: true,
+        capabilities: {},
+        updated_at: now
+      }).where("id", "=", SOURCE_CALENDAR_ID).executeTakeFirstOrThrow();
+      await transaction.updateTable("calendar_endpoints").set({
+        connection_id: DESTINATION_CONNECTION_ID,
+        remote_id: "fake-work-primary",
+        name: "Work",
+        timezone: "America/Vancouver",
+        access_role: "owner",
+        readable: false,
+        writable: true,
+        primary_calendar: true,
+        capabilities: {
+          private_visibility: true,
+          conference_copy: false,
+          color: true
+        },
+        updated_at: now
+      }).where("id", "=", DESTINATION_CALENDAR_ID).executeTakeFirstOrThrow();
+      repairedEndpointCount = await repairFakeDemoCrossAccountEndpoints(transaction, {
+        sourceConnectionId: SOURCE_CONNECTION_ID,
+        destinationConnectionId: DESTINATION_CONNECTION_ID,
+        sourceCalendarId: SOURCE_CALENDAR_ID,
+        destinationCalendarId: DESTINATION_CALENDAR_ID,
+        sourceRemoteId: "fake-personal-primary",
+        destinationRemoteId: "fake-work-primary"
+      });
       await transaction
         .insertInto("sync_cursors")
         .values({
@@ -171,7 +225,11 @@ async function main(): Promise<void> {
         }))
         .execute();
     });
-    console.log("Seeded the idempotent local fake-provider calendar demo.");
+    console.log(
+      repairedEndpointCount === 0
+        ? "Seeded the idempotent local fake-provider calendar demo."
+        : `Seeded the local fake-provider demo and removed ${repairedEndpointCount} unreferenced cross-account endpoint${repairedEndpointCount === 1 ? "" : "s"}.`
+    );
   } finally {
     config.masterKey.fill(0);
     await database.close();

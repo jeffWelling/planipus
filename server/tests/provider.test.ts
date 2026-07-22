@@ -2,6 +2,7 @@ import type { DesiredCopy, SourceObservation } from "@planipus/calendar-sync";
 import { describe, expect, it } from "vitest";
 
 import { FakeCalendarProvider } from "../src/providers/fake.js";
+import { fakeAccessTokenForConnection } from "../src/providers/fake-token.js";
 import { GoogleCalendarProvider } from "../src/providers/google/calendar.js";
 import { serializeGoogleDesiredCopy, serializeGooglePlanningEvent } from "../src/providers/google/serializer.js";
 import type { ManagedPlanningEvent } from "../src/planning/types.js";
@@ -61,6 +62,69 @@ const planned: ManagedPlanningEvent = {
 };
 
 describe("provider boundary", () => {
+  it("keeps fake account calendar discovery isolated by connection", async () => {
+    const provider = new FakeCalendarProvider();
+    const personalToken = fakeAccessTokenForConnection("personal-connection");
+    const workToken = fakeAccessTokenForConnection("work-connection");
+    provider.addCalendar({
+      remoteId: "primary",
+      name: "Personal",
+      timezone: "UTC",
+      accessRole: "reader",
+      readable: true,
+      writable: false,
+      primary: true
+    }, personalToken);
+    provider.addCalendar({
+      remoteId: "primary",
+      name: "Work",
+      timezone: "UTC",
+      accessRole: "owner",
+      readable: true,
+      writable: true,
+      primary: true
+    }, workToken);
+
+    await expect(provider.listCalendars(personalToken)).resolves.toMatchObject([{ name: "Personal" }]);
+    await expect(provider.listCalendars(workToken)).resolves.toMatchObject([{ name: "Work" }]);
+    await expect(provider.listCalendars(fakeAccessTokenForConnection("unknown-connection")))
+      .resolves.toEqual([]);
+    await expect(provider.createEvent(
+      personalToken,
+      "primary",
+      "same-event",
+      { ...desired, summary: "Personal busy" }
+    )).resolves.toMatchObject({ remoteRevision: "1" });
+    await expect(provider.createEvent(
+      workToken,
+      "primary",
+      "same-event",
+      { ...desired, summary: "Work busy" }
+    )).resolves.toMatchObject({ remoteRevision: "1" });
+    expect(provider.desired("primary", "same-event", personalToken)?.summary).toBe("Personal busy");
+    expect(provider.desired("primary", "same-event", workToken)?.summary).toBe("Work busy");
+    await provider.deleteEvent(workToken, "primary", "same-event", "1");
+    expect(provider.desired("primary", "same-event", personalToken)?.summary).toBe("Personal busy");
+    expect(provider.desired("primary", "same-event", workToken)).toBeNull();
+
+    await expect(provider.createPlanningEvent(
+      personalToken,
+      "primary",
+      "same-planned-event",
+      { ...planned, summary: "Personal meeting" }
+    )).resolves.toMatchObject({ remoteRevision: "1" });
+    await expect(provider.createPlanningEvent(
+      workToken,
+      "primary",
+      "same-planned-event",
+      { ...planned, summary: "Work meeting" }
+    )).resolves.toMatchObject({ remoteRevision: "1" });
+    expect(provider.planningDesired("primary", "same-planned-event", personalToken)?.summary)
+      .toBe("Personal meeting");
+    expect(provider.planningDesired("primary", "same-planned-event", workToken)?.summary)
+      .toBe("Work meeting");
+  });
+
   it("recovers an ambiguous create through its deterministic identifier", async () => {
     const provider = new FakeCalendarProvider();
     provider.addCalendar({
@@ -134,12 +198,14 @@ describe("provider boundary", () => {
       destination_identity_invited: false,
       content: { summary: "Private appointment" }
     };
-    provider.setObservations("personal", Array.from({ length: 101 }, () => observation));
+    provider.setObservations("personal", Array.from({ length: 101 }, () => observation), "token");
     const first = await provider.listEvents("token", "personal", {});
     const second = await provider.listEvents("token", "personal", { pageToken: first.nextPageToken ?? "100" });
+    const unrelated = await provider.listEvents("other-token", "personal", {});
     expect(first.observations).toHaveLength(100);
     expect(second.observations).toHaveLength(1);
     expect(second.nextSyncToken).toBe("fake-sync-101");
+    expect(unrelated.observations).toHaveLength(0);
   });
 
   it("materializes recurring instances and preserves exception identities", async () => {

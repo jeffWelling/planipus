@@ -19,7 +19,10 @@ export class Scheduler {
 
   public async tick(now = new Date()): Promise<void> {
     await this.db.transaction().execute(async (transaction) => {
-      const organizations = await transaction.selectFrom("organizations").select("id").execute();
+      const organizations = await transaction.selectFrom("organizations")
+        .select("id")
+        .orderBy("id", "asc")
+        .execute();
       const discoveryWindow = Math.floor(now.getTime() / DISCOVERY_WINDOW_MILLISECONDS);
       const reconcileWindow = Math.floor(now.getTime() / RECONCILE_WINDOW_MILLISECONDS);
       const destinationVerificationWindow = Math.floor(
@@ -31,9 +34,10 @@ export class Scheduler {
           .select("id")
           .where("organization_id", "=", organization.id)
           .where("status", "=", "active")
+          .orderBy("id", "asc")
           .execute();
         for (const connection of connections) {
-          await this.jobs.enqueue(
+          await this.jobs.enqueueOnce(
             organization.id,
             "discover_calendars",
             `connection:${connection.id}:window:${discoveryWindow}`,
@@ -47,6 +51,7 @@ export class Scheduler {
           .select("id")
           .where("organization_id", "=", organization.id)
           .where("readable", "=", true)
+          .orderBy("id", "asc")
           .execute();
         for (const calendar of calendars) {
           await this.jobs.enqueue(
@@ -63,9 +68,10 @@ export class Scheduler {
           .select(["id", "revision"])
           .where("organization_id", "=", organization.id)
           .where("status", "=", "active")
+          .orderBy("id", "asc")
           .execute();
         for (const policy of policies) {
-          await this.jobs.enqueue(
+          await this.jobs.enqueueOnce(
             organization.id,
             "reconcile_policy",
             `policy:${policy.id}:revision:${policy.revision}:safety:${reconcileWindow}`,
@@ -79,9 +85,10 @@ export class Scheduler {
           .select(["id", "revision"])
           .where("organization_id", "=", organization.id)
           .where("status", "=", "active")
+          .orderBy("id", "asc")
           .execute() : [];
         for (const rule of planningRules) {
-          await this.jobs.enqueue(
+          await this.jobs.enqueueOnce(
             organization.id,
             "reconcile_planning_rule",
             `planning-rule:${rule.id}:revision:${rule.revision}:window:${reconcileWindow}`,
@@ -90,7 +97,7 @@ export class Scheduler {
             transaction
           );
         }
-        await this.jobs.enqueue(
+        await this.jobs.enqueueOnce(
           organization.id,
           "verify_destinations",
           `organization:${organization.id}:window:${destinationVerificationWindow}`,

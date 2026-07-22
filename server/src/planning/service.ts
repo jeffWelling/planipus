@@ -22,6 +22,51 @@ import { parsePlanningDraft, PlanningInputError } from "./validation.js";
 type Executor = Kysely<DatabaseSchema> | Transaction<DatabaseSchema>;
 const AVAILABILITY_MAX_AGE_MILLISECONDS = 30 * 60_000;
 
+interface PlanningSnapshotState {
+  readonly target: {
+    readonly id: string;
+    readonly writable: boolean;
+    readonly status: string;
+    readonly intended_role: string;
+  };
+  readonly calendars: readonly {
+    readonly id: string;
+    readonly readable: boolean;
+    readonly status: string;
+  }[];
+  readonly knownAvailabilityCalendarIds: readonly string[];
+  readonly busy: readonly PlanningBusyInterval[];
+}
+
+export function planningSnapshotDocument(state: PlanningSnapshotState): object {
+  return {
+    version: 2,
+    target: {
+      id: state.target.id,
+      writable: state.target.writable,
+      status: state.target.status,
+      intended_role: state.target.intended_role
+    },
+    calendars: state.calendars
+      .map((calendar) => ({
+        id: calendar.id,
+        readable: calendar.readable,
+        status: calendar.status
+      }))
+      .sort((left, right) => compareText(left.id, right.id)),
+    availability_calendar_ids: [...state.knownAvailabilityCalendarIds].sort(),
+    busy: [...state.busy].sort((left, right) =>
+      compareText(left.calendar_id, right.calendar_id)
+      || compareText(left.start, right.start)
+      || compareText(left.end, right.end)
+    )
+  };
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 export interface PlanningPreviewDocument extends PlanningResult {
   readonly preview_token: string;
   readonly expires_at: string;
@@ -800,31 +845,12 @@ export class PlanningService {
         });
       }
     }
-    const snapshotHash = this.runtime.hash({
-      version: 1,
-      target: { id: target.id, updated_at: target.updated_at.toISOString() },
-      calendars: calendars.map((calendar) => ({
-        id: calendar.id,
-        updated_at: calendar.updated_at.toISOString(),
-        status: calendar.status
-      })),
-      cursors: cursors.map((cursor) => ({
-        calendar_id: cursor.calendar_endpoint_id,
-        state: cursor.state,
-        last_success_at: cursor.last_success_at?.toISOString() ?? null,
-        updated_at: cursor.updated_at.toISOString()
-      })),
-      observations: observations.map((row) => ({
-        calendar_id: row.calendar_endpoint_id,
-        hash: row.observation_hash,
-        tombstone: row.tombstone
-      })),
-      planned: planned.map((row) => ({
-        id: row.id,
-        desired_hash: row.desired_hash,
-        status: row.status
-      }))
-    });
+    const snapshotHash = this.runtime.hash(planningSnapshotDocument({
+      target,
+      calendars,
+      knownAvailabilityCalendarIds: known,
+      busy
+    }));
     return {
       input: {
         draft,

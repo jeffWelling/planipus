@@ -10,6 +10,7 @@ import type { DatabaseSchema } from "./database/types.js";
 import { PolicyService } from "./policy/service.js";
 import { sharedPolicyRuntime } from "./policy/runtime.js";
 import { FakeCalendarProvider } from "./providers/fake.js";
+import { fakeAccessTokenForConnection } from "./providers/fake-token.js";
 import { GoogleCalendarProvider } from "./providers/google/calendar.js";
 import { GoogleOAuthService, GoogleTokenBroker } from "./providers/google/oauth.js";
 import {
@@ -155,6 +156,7 @@ async function hydrateFakeProvider(
     .innerJoin("provider_connections", "provider_connections.id", "calendar_endpoints.connection_id")
     .select([
       "calendar_endpoints.id",
+      "calendar_endpoints.connection_id",
       "calendar_endpoints.remote_id",
       "calendar_endpoints.name",
       "calendar_endpoints.timezone",
@@ -166,6 +168,7 @@ async function hydrateFakeProvider(
     .where("provider_connections.provider", "=", "fake")
     .execute();
   for (const calendar of calendars) {
+    const accessToken = fakeAccessTokenForConnection(calendar.connection_id);
     provider.addCalendar({
       remoteId: calendar.remote_id,
       name: calendar.name,
@@ -174,7 +177,7 @@ async function hydrateFakeProvider(
       readable: calendar.readable,
       writable: calendar.writable,
       primary: calendar.primary_calendar
-    });
+    }, accessToken);
     const observations = await db.selectFrom("source_observations")
       .select("normalized_event")
       .where("calendar_endpoint_id", "=", calendar.id)
@@ -184,7 +187,8 @@ async function hydrateFakeProvider(
       .execute();
     provider.setObservations(
       calendar.remote_id,
-      observations.map((row) => row.normalized_event as unknown as SourceObservation)
+      observations.map((row) => row.normalized_event as unknown as SourceObservation),
+      accessToken
     );
   }
 }
