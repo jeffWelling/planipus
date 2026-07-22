@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://planipus.org/schema/calendar-sync/v1/hours-evaluation.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mode", "event"],
+  "properties": {
+    "mode": {"enum": ["all_times", "overlaps_profile", "contained_in_profile"]},
+    "event": {"$ref": "#/$defs/instantInterval"},
+    "profile": {"$ref": "#/$defs/profile"}
+  },
+  "$defs": {
+    "instantInterval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "string", "format": "date-time", "pattern": "Z$"},
+        "end": {"type": "string", "format": "date-time", "pattern": "Z$"}
+      }
+    },
+    "localInterval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "end_day_offset"],
+      "properties": {
+        "start": {"type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]:[0-5][0-9]$"},
+        "end": {"type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]:[0-5][0-9]$"},
+        "end_day_offset": {"enum": [0, 1]}
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_ref", "revision", "timezone", "dst_resolution", "weekly", "exceptions"],
+      "properties": {
+        "profile_ref": {"type": "string"},
+        "revision": {"type": "integer", "minimum": 1},
+        "timezone": {"type": "string"},
+        "dst_resolution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ambiguous", "nonexistent"],
+          "properties": {
+            "ambiguous": {"enum": ["earlier_offset", "later_offset"]},
+            "nonexistent": {"enum": ["reject", "shift_forward_by_gap"]}
+          }
+        },
+        "weekly": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["weekday", "start", "end", "end_day_offset"],
+            "properties": {
+              "weekday": {"type": "integer", "minimum": 1, "maximum": 7},
+              "start": {"type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]:[0-5][0-9]$"},
+              "end": {"type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]:[0-5][0-9]$"},
+              "end_day_offset": {"enum": [0, 1]}
+            }
+          }
+        },
+        "exceptions": {"type": "array", "items": {"type": "object"}}
+      }
+    }
+  }
+}

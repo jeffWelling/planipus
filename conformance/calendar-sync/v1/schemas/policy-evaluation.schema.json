@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://planipus.org/schema/calendar-sync/v1/policy-evaluation.schema.json",
+  "type": "object",
+  "required": ["now", "horizon", "candidate_projection_ref", "policy", "source", "projection", "destination_capabilities"],
+  "properties": {
+    "now": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "candidate_projection_ref": {"type": "string", "minLength": 1},
+    "horizon": {"type": "object"},
+    "policy": {"type": "object"},
+    "hours_profile": {"type": "object"},
+    "source": {"type": "object"},
+    "projection": {"type": "object"},
+    "destination_capabilities": {"type": "object"}
+  }
+}

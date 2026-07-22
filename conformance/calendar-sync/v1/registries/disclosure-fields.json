@@ -1,0 +1,16 @@
+{
+  "$schema": "../schemas/registry.schema.json",
+  "contract_version": 1,
+  "entries": [
+    {"id": "/attachments", "class": "source_sensitive"},
+    {"id": "/attendees", "class": "source_sensitive"},
+    {"id": "/content/conference", "class": "source_sensitive"},
+    {"id": "/content/description", "class": "source_sensitive"},
+    {"id": "/content/location", "class": "source_sensitive"},
+    {"id": "/content/summary", "class": "source_sensitive"},
+    {"id": "/organizer", "class": "source_sensitive"},
+    {"id": "/provider_metadata", "class": "source_sensitive"},
+    {"id": "/source_url", "class": "source_sensitive"},
+    {"id": "/timing", "class": "availability_required"}
+  ]
+}

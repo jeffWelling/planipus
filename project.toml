@@ -1,0 +1,29 @@
+[_]
+schema-version = "0.2"
+
+[project]
+id = "ca.justdev.planipus"
+name = "Planipus Server"
+version = "0.1.0"
+
+[build]
+exclude = [
+  ".git/",
+  ".github/",
+  ".build/",
+  "conformance/",
+  "deploy/",
+  "docs/",
+  "macos/",
+  "server/tests/",
+  "server/vitest.config.ts",
+  "spikes/"
+]
+
+[[build.env]]
+name = "BP_NODE_RUN_SCRIPTS"
+value = "build"
+
+[[build.env]]
+name = "BP_LOG_LEVEL"
+value = "INFO"

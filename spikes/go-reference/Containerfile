@@ -1,0 +1,4 @@
+FROM scratch
+
+LABEL org.opencontainers.image.title="Planipus archived Go reference spike"
+LABEL org.opencontainers.image.description="Non-runnable historical artifact; do not deploy or use as a product foundation."

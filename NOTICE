@@ -1,0 +1,9 @@
+Planipus
+Copyright 2026 Planipus contributors
+
+Planipus source code and documentation are distributed under the Apache
+License, Version 2.0.
+
+The project uses independently reviewed open-source components listed in
+THIRD_PARTY_NOTICES.md and docs/REUSE-MAP.md. Historical behavior research is
+not an implementation source and does not grant or imply donor compatibility.

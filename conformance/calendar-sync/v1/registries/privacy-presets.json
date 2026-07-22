@@ -1,0 +1,38 @@
+{
+  "$schema": "../schemas/registry.schema.json",
+  "contract_version": 1,
+  "entries": [
+    {
+      "id": "busy_only",
+      "version": 1,
+      "visibility": "private",
+      "summary": "policy_generic_summary",
+      "allowed_switches": [],
+      "always_omitted": ["attachments", "attendees", "conference", "description", "location", "organizer", "provider_metadata", "source_summary", "source_url"]
+    },
+    {
+      "id": "commitment",
+      "version": 1,
+      "visibility": "private",
+      "summary": "policy_generic_summary",
+      "allowed_switches": [],
+      "always_omitted": ["attachments", "attendees", "conference", "description", "location", "organizer", "provider_metadata", "source_summary", "source_url"]
+    },
+    {
+      "id": "private_details",
+      "version": 1,
+      "visibility": "private",
+      "summary": "explicit_switch",
+      "allowed_switches": ["copy_conference", "copy_description", "copy_location", "copy_summary"],
+      "always_omitted": ["attachments", "attendees", "organizer", "provider_metadata", "source_url"]
+    },
+    {
+      "id": "shared_details",
+      "version": 1,
+      "visibility": "default",
+      "summary": "explicit_switch",
+      "allowed_switches": ["copy_conference", "copy_description", "copy_location", "copy_summary"],
+      "always_omitted": ["attachments", "attendees", "organizer", "provider_metadata", "source_url"]
+    }
+  ]
+}

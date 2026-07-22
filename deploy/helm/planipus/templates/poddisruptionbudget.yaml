@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "planipus.fullname" . }}
+  labels:
+    {{- include "planipus.labels" . | nindent 4 }}
+spec:
+  minAvailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "planipus.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}

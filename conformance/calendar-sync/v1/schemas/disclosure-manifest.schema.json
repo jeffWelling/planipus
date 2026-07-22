@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://planipus.org/schema/calendar-sync/v1/disclosure-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "preset", "source_fields_read", "source_fields_disclosed", "destination_fields_written", "source_fields_omitted"],
+  "properties": {
+    "version": {"const": 1},
+    "preset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": {"enum": ["busy_only", "commitment", "private_details", "shared_details"]},
+        "version": {"const": 1}
+      }
+    },
+    "source_fields_read": {"$ref": "#/$defs/paths"},
+    "source_fields_disclosed": {"$ref": "#/$defs/paths"},
+    "destination_fields_written": {"$ref": "#/$defs/paths"},
+    "source_fields_omitted": {"$ref": "#/$defs/paths"}
+  },
+  "$defs": {
+    "paths": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^/"}
+    }
+  }
+}

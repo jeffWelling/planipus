@@ -1,0 +1,845 @@
+{
+  "contract_version": 1,
+  "cases": [
+    {
+      "case_id": "hours.add_exception",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.all_times_outside_profile",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.closed_exception",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.contained_across_gap_excluded",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.contained_exact",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.contained_partial_excluded",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.cross_timezone_instant",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.event_ends_at_open_excluded",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.event_starts_at_close_excluded",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.exact_open_close_included",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.fall_fold_earlier",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.fall_fold_later",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.multi_day_any_overlap",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.overlap_across_lunch_gap",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.overlap_inside",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.overnight_after_midnight",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.overnight_before_midnight",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.partial_left_full_duration",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.partial_right_full_duration",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.quarter_hour_timezone",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.remove_exception",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.replace_exception",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.spring_gap_reject",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "hours.spring_gap_shift",
+      "kind": "hours_evaluation",
+      "path": "cases/hours/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "privacy.busy_only_exact",
+      "kind": "policy_evaluation",
+      "path": "cases/privacy/presets.json",
+      "requirements": [
+        "CAL-011",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "privacy.color_override",
+      "kind": "policy_evaluation",
+      "path": "cases/privacy/presets.json",
+      "requirements": [
+        "CAL-011",
+        "CAL-014",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "privacy.commitment_exact",
+      "kind": "policy_evaluation",
+      "path": "cases/privacy/presets.json",
+      "requirements": [
+        "CAL-011",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "privacy.free_details_preserved_by_default_rule",
+      "kind": "policy_evaluation",
+      "path": "cases/privacy/presets.json",
+      "requirements": [
+        "CAL-011",
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "privacy.private_all_fields",
+      "kind": "policy_evaluation",
+      "path": "cases/privacy/presets.json",
+      "requirements": [
+        "CAL-011",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "privacy.private_title_only",
+      "kind": "policy_evaluation",
+      "path": "cases/privacy/presets.json",
+      "requirements": [
+        "CAL-011",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "privacy.shared_all_fields",
+      "kind": "policy_evaluation",
+      "path": "cases/privacy/presets.json",
+      "requirements": [
+        "CAL-011",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "privacy.shared_title_only",
+      "kind": "policy_evaluation",
+      "path": "cases/privacy/presets.json",
+      "requirements": [
+        "CAL-011",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "privacy.source_reminders_attendees_stripped",
+      "kind": "policy_evaluation",
+      "path": "cases/privacy/presets.json",
+      "requirements": [
+        "CAL-011",
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.ambiguous_ownership_hold",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-013",
+        "MAC-011",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.destination_drift_restored",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.destination_missing_restored",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.detached_excluded_no_action",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.detached_included_no_action",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.disabled_no_implicit_cleanup",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.identical_no_change",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.marker_only_not_ownership",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.paused_retains_copy",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-013",
+        "CAL-014",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.policy_exclusion_deletes",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.redacted_title_change_no_write",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-011",
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.remove_copy_requires_manual_exclusion",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.review_required_holds",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-013",
+        "MAC-011",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.source_cancelled",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-012",
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.source_deleted",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-012",
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "reconcile.stricter_privacy_removes_fields",
+      "kind": "policy_evaluation",
+      "path": "cases/reconciliation/core.json",
+      "requirements": [
+        "CAL-011",
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.all_day_all_preserves_dates",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-010",
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.all_day_busy_only_busy",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.all_day_busy_only_free",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.all_day_skip",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.destination_identity_invited",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.free_forced_busy",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.free_preserved",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.free_redacted_skip",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.horizon_positive_overlap",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.managed_copy_marker",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.manual_exclusion",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.moved_recurring_occurrence_materialized",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.nosync_description",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.nosync_nfc_equivalence",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.nosync_response_note",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.nosync_substring_not_boundary",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.nosync_title_unicode_case",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.organizer_assumed_accepted",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.outside_horizon_left",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.recurring_occurrence_materialized",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.rsvp_accepted",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.rsvp_declined",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.rsvp_tentative_busy",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.rsvp_tentative_free",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.rsvp_tentative_omit",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.rsvp_unanswered_busy",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.rsvp_unanswered_free_then_skip",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.rsvp_unanswered_omit",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.timed_disabled",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.timed_outside_hours",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-010",
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "selection.timed_overlap_included",
+      "kind": "policy_evaluation",
+      "path": "cases/selection/core.json",
+      "requirements": [
+        "CAL-009",
+        "CAL-010",
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "validation.attendee_copy_rejected",
+      "kind": "validation",
+      "path": "cases/validation/core.json",
+      "requirements": [
+        "CAL-011",
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "validation.color_unsupported",
+      "kind": "validation",
+      "path": "cases/validation/core.json",
+      "requirements": [
+        "CAL-011",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "validation.conference_copy_unsupported",
+      "kind": "validation",
+      "path": "cases/validation/core.json",
+      "requirements": [
+        "CAL-011",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "validation.empty_generic_summary",
+      "kind": "validation",
+      "path": "cases/validation/core.json",
+      "requirements": [
+        "CAL-011",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "validation.hours_profile_reference_mismatch",
+      "kind": "validation",
+      "path": "cases/validation/core.json",
+      "requirements": [
+        "CAL-010",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "validation.missing_confirmed_timing",
+      "kind": "validation",
+      "path": "cases/validation/core.json",
+      "requirements": [
+        "CAL-012",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "validation.organizer_copy_rejected",
+      "kind": "validation",
+      "path": "cases/validation/core.json",
+      "requirements": [
+        "CAL-011",
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "validation.private_visibility_unsupported",
+      "kind": "validation",
+      "path": "cases/validation/core.json",
+      "requirements": [
+        "CAL-011",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "validation.redacted_switch_rejected",
+      "kind": "validation",
+      "path": "cases/validation/core.json",
+      "requirements": [
+        "CAL-011",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "validation.same_calendar",
+      "kind": "validation",
+      "path": "cases/validation/core.json",
+      "requirements": [
+        "CAL-009",
+        "CAL-013",
+        "MAC-012"
+      ]
+    },
+    {
+      "case_id": "validation.unwritable_destination",
+      "kind": "validation",
+      "path": "cases/validation/core.json",
+      "requirements": [
+        "CAL-009",
+        "MAC-012"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,234 @@
+apiVersion: apps/v1
+kind: StatefulSet
+{{- if and .Values.postgresql.enabled (eq .Values.postgresql.adminUsername .Values.postgresql.username) }}
+{{- fail "postgresql.adminUsername must differ from postgresql.username" }}
+{{- end }}
+{{- if and .Values.postgresql.enabled (eq .Values.postgresql.existingAdminSecret .Values.existingSecret) }}
+{{- fail "postgresql.existingAdminSecret must differ from existingSecret" }}
+{{- end }}
+metadata:
+  name: {{ include "planipus.fullname" . }}
+  labels:
+    {{- include "planipus.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "planipus.fullname" . }}
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "planipus.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "planipus.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.postgresql.enabled }}
+        checksum/postgres-init: {{ include (print $.Template.BasePath "/postgres-init.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "planipus.fullname" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        {{- if .Values.postgresql.enabled }}
+        fsGroup: 999
+        {{- else }}
+        fsGroup: 10001
+        {{- end }}
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: {{ include "planipus.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [{{ .Values.process.api | quote }}]
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "planipus.fullname" . }}
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+          securityContext: &appSecurityContext
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: api-tmp
+              mountPath: /tmp
+          startupProbe:
+            httpGet:
+              path: /api/health/startup
+              port: http
+            failureThreshold: 90
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /api/health/ready
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health/live
+              port: http
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources.api | nindent 12 }}
+        - name: scheduler
+          image: {{ include "planipus.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [{{ .Values.process.scheduler | quote }}]
+          envFrom:
+            - configMapRef:
+                name: {{ include "planipus.fullname" . }}
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+          securityContext: *appSecurityContext
+          volumeMounts:
+            - name: scheduler-tmp
+              mountPath: /tmp
+          livenessProbe:
+            exec:
+              command: ["node", "-e", "process.kill(1, 0)"]
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.resources.scheduler | nindent 12 }}
+        - name: worker
+          image: {{ include "planipus.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [{{ .Values.process.worker | quote }}]
+          envFrom:
+            - configMapRef:
+                name: {{ include "planipus.fullname" . }}
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+          securityContext: *appSecurityContext
+          volumeMounts:
+            - name: worker-tmp
+              mountPath: /tmp
+          livenessProbe:
+            exec:
+              command: ["node", "-e", "process.kill(1, 0)"]
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.resources.worker | nindent 12 }}
+        {{- if .Values.postgresql.enabled }}
+        - name: postgres
+          image: {{ include "planipus.postgresqlImage" . }}
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+          args: ["postgres", "-c", "listen_addresses=127.0.0.1", "-c", "password_encryption=scram-sha-256"]
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.adminUsername | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgresql.existingAdminSecret }}
+                  key: POSTGRES_PASSWORD
+            - name: PLANIPUS_APP_USERNAME
+              value: {{ .Values.postgresql.username | quote }}
+            - name: PLANIPUS_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: {{ .Values.postgresql.dataPath | quote }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              subPath: postgres
+            - name: postgres-tmp
+              mountPath: /tmp
+            - name: postgres-init
+              mountPath: /docker-entrypoint-initdb.d/10-planipus-app.sh
+              subPath: 10-planipus-app.sh
+              readOnly: true
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-U", {{ .Values.postgresql.adminUsername | quote }}, "-d", {{ .Values.postgresql.database | quote }}]
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-U", {{ .Values.postgresql.adminUsername | quote }}, "-d", {{ .Values.postgresql.database | quote }}]
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
+        {{- end }}
+      volumes:
+        - name: api-tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: scheduler-tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: worker-tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        {{- if .Values.postgresql.enabled }}
+        - name: postgres-tmp
+          emptyDir:
+            sizeLimit: 128Mi
+        - name: postgres-init
+          configMap:
+            name: {{ include "planipus.fullname" . }}-postgres-init
+            defaultMode: 0555
+        {{- if not .Values.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if and .Values.postgresql.enabled .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- if .Values.persistence.storageClassName }}
+        storageClassName: {{ .Values.persistence.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}

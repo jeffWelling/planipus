@@ -1,0 +1,4 @@
+# Standard profile: the application containers connect to PostgreSQL supplied
+# outside this Pod through DATABASE_URL in the existing Secret.
+postgresql:
+  enabled: false

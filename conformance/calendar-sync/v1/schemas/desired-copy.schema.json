@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://planipus.org/schema/calendar-sync/v1/desired-copy.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["timing", "summary", "transparency", "visibility", "reminders", "write_controls", "provenance"],
+  "properties": {
+    "timing": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "start_instant", "end_instant", "start_tzid", "end_tzid"],
+          "properties": {
+            "kind": {"const": "timed"},
+            "start_instant": {"type": "string", "format": "date-time", "pattern": "Z$"},
+            "end_instant": {"type": "string", "format": "date-time", "pattern": "Z$"},
+            "start_tzid": {"type": "string"},
+            "end_tzid": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "start_date", "end_date", "timezone"],
+          "properties": {
+            "kind": {"const": "all_day"},
+            "start_date": {"type": "string", "format": "date"},
+            "end_date": {"type": "string", "format": "date"},
+            "timezone": {"type": "string"}
+          }
+        }
+      ]
+    },
+    "summary": {"type": "string"},
+    "description": {"type": "string"},
+    "location": {"type": "string"},
+    "conference": {"type": "string"},
+    "transparency": {"enum": ["opaque", "transparent"]},
+    "visibility": {"enum": ["private", "default"]},
+    "color": {"type": "string"},
+    "reminders": {"type": "array", "maxItems": 0},
+    "write_controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["send_notifications"],
+      "properties": {"send_notifications": {"const": false}}
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "policy_ref", "projection_ref", "generation"],
+      "properties": {
+        "version": {"const": 1},
+        "policy_ref": {"type": "string", "minLength": 1},
+        "projection_ref": {"type": "string", "minLength": 1},
+        "generation": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

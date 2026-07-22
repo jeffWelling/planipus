@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: Node
+    runs-on: ubuntu-latest
+    env:
+      PLANIPUS_TEST_DATABASE_URL: postgresql://planipus:planipus@127.0.0.1:5432/planipus
+    services:
+      postgres:
+        image: postgres:17.7-bookworm
+        env:
+          POSTGRES_USER: planipus
+          POSTGRES_PASSWORD: planipus
+          POSTGRES_DB: planipus
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U planipus -d planipus"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify provenance, docs, types, tests, and builds
+        run: npm run verify
+
+  macos:
+    name: Native macOS
+    runs-on: macos-15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Build
+        working-directory: macos
+        run: swift build -c release
+
+      - name: Test
+        working-directory: macos
+        run: swift test
+
+  helm:
+    name: Helm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint solo profile
+        run: helm lint deploy/helm/planipus
+
+      - name: Render solo profile
+        run: helm template planipus deploy/helm/planipus >/dev/null
+
+      - name: Reject shared application and PostgreSQL administrator Secret
+        run: |
+          if helm template planipus deploy/helm/planipus \
+            --set existingSecret=shared-database-secret \
+            --set postgresql.existingAdminSecret=shared-database-secret >/dev/null 2>&1; then
+            echo "chart accepted an unsafe shared database Secret" >&2
+            exit 1
+          fi
+
+      - name: Lint standard profile
+        run: helm lint deploy/helm/planipus -f deploy/helm/planipus/values-standard.yaml
+
+      - name: Render standard profile
+        run: helm template planipus deploy/helm/planipus -f deploy/helm/planipus/values-standard.yaml >/dev/null

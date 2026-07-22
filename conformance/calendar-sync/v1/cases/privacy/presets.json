@@ -1,0 +1,37 @@
+{
+  "$schema": "../../schemas/case-bundle.schema.json",
+  "contract_version": 1,
+  "kind": "policy_evaluation",
+  "defaults": {
+    "input": {
+      "now":"2026-07-20T12:00:00Z","horizon":{"start":"2026-07-01T00:00:00Z","end":"2026-08-01T00:00:00Z"},"candidate_projection_ref":"projection-privacy",
+      "policy": {
+        "policy_ref":"policy-privacy","revision":1,"state":"active","source_calendar_ref":"calendar-personal","destination_calendar_ref":"calendar-work",
+        "hours":{"mode":"all_times"},
+        "privacy":{"preset":"busy_only","preset_version":1,"generic_summary":"Busy","copy_summary":false,"copy_description":false,"copy_location":false,"copy_conference":false,"copy_attendees":false,"copy_organizer":false},
+        "selection":{"timed":"include","all_day":"skip","free_events":"skip_when_redacted","tentative":"busy","unanswered":"free","skip_when_destination_identity_invited":true,"source_exclusion_marker":"#nosync","manual_exclusions":[]},
+        "destination":{}
+      },
+      "source": {
+        "source_event_ref":"source-private","source_occurrence_ref":"source-private/occurrence","remote_revision":"r1","lifecycle":"confirmed","origin":"provider_original",
+        "timing":{"kind":"timed","start_instant":"2026-07-20T17:00:00Z","end_instant":"2026-07-20T18:00:00Z","start_tzid":"America/Vancouver","end_tzid":"America/Vancouver"},
+        "availability":"busy","relationship":{"role":"none","response":"not_applicable"},"destination_identity_invited":false,
+        "content":{"summary":"Secret title sentinel","description":"Secret description sentinel","location":"Secret location sentinel","conference":"https://secret.example.test/meeting"},
+        "attendees":["secret-attendee@example.test"],"organizer":"secret-organizer@example.test","attachments":["secret-attachment"],"source_url":"https://secret.example.test/source","provider_metadata":{"sentinel":"secret-provider-metadata"}
+      },
+      "projection":{"ownership":"none"},
+      "destination_capabilities":{"writable":true,"private_visibility":true,"conference_copy":true,"color":true}
+    }
+  },
+  "cases": [
+    {"case_id":"privacy.busy_only_exact","title":"Busy-only writes only generic private availability","requirements":["CAL-011","MAC-012"],"input_patch":{},"expected":{"selection":"included","operation":"create","primary_reason_code":"create_missing_copy","reason_codes_include":["privacy_busy_only"],"desired_fields":{"summary":"Busy","transparency":"opaque","visibility":"private"},"desired_absent_fields":["description","location","conference"],"forbidden_values":["Secret title sentinel","Secret description sentinel","Secret location sentinel","secret-attendee@example.test","secret-organizer@example.test","secret-provider-metadata"]}},
+    {"case_id":"privacy.commitment_exact","title":"Commitment writes configured generic category","requirements":["CAL-011","MAC-012"],"input_patch":{"policy":{"privacy":{"preset":"commitment","generic_summary":"Personal commitment"}}},"expected":{"selection":"included","operation":"create","primary_reason_code":"create_missing_copy","reason_codes_include":["privacy_commitment"],"desired_fields":{"summary":"Personal commitment","visibility":"private"},"desired_absent_fields":["description","location","conference"]}},
+    {"case_id":"privacy.private_title_only","title":"Private details can copy only title","requirements":["CAL-011","MAC-012"],"input_patch":{"policy":{"privacy":{"preset":"private_details","copy_summary":true}}},"expected":{"selection":"included","operation":"create","primary_reason_code":"create_missing_copy","reason_codes_include":["privacy_private_details"],"desired_fields":{"summary":"Secret title sentinel","visibility":"private"},"desired_absent_fields":["description","location","conference"]}},
+    {"case_id":"privacy.private_all_fields","title":"Private details copies every explicitly selected safe field","requirements":["CAL-011","MAC-012"],"input_patch":{"policy":{"privacy":{"preset":"private_details","copy_summary":true,"copy_description":true,"copy_location":true,"copy_conference":true}}},"expected":{"selection":"included","operation":"create","primary_reason_code":"create_missing_copy","desired_fields":{"summary":"Secret title sentinel","description":"Secret description sentinel","location":"Secret location sentinel","conference":"https://secret.example.test/meeting","visibility":"private"},"disclosed_fields_include":["/content/summary","/content/description","/content/location","/content/conference"]}},
+    {"case_id":"privacy.shared_title_only","title":"Shared details uses destination-default visibility","requirements":["CAL-011","MAC-012"],"input_patch":{"policy":{"privacy":{"preset":"shared_details","copy_summary":true}}},"expected":{"selection":"included","operation":"create","primary_reason_code":"create_missing_copy","reason_codes_include":["privacy_shared_details"],"desired_fields":{"summary":"Secret title sentinel","visibility":"default"},"desired_absent_fields":["description","location","conference"]}},
+    {"case_id":"privacy.shared_all_fields","title":"Shared details copies explicit safe fields","requirements":["CAL-011","MAC-012"],"input_patch":{"policy":{"privacy":{"preset":"shared_details","copy_summary":true,"copy_description":true,"copy_location":true,"copy_conference":true}}},"expected":{"selection":"included","operation":"create","primary_reason_code":"create_missing_copy","desired_fields":{"summary":"Secret title sentinel","description":"Secret description sentinel","location":"Secret location sentinel","conference":"https://secret.example.test/meeting","visibility":"default"}}},
+    {"case_id":"privacy.source_reminders_attendees_stripped","title":"Source invitation-adjacent fields never enter desired copy","requirements":["CAL-011","CAL-013","MAC-012"],"input_patch":{"policy":{"privacy":{"preset":"shared_details","copy_summary":true}}},"expected":{"selection":"included","operation":"create","primary_reason_code":"create_missing_copy","desired_absent_fields":["attendees","organizer","attachments","source_url","provider_metadata"],"forbidden_values":["secret-attendee@example.test","secret-organizer@example.test","secret-attachment","https://secret.example.test/source","secret-provider-metadata"]}},
+    {"case_id":"privacy.color_override","title":"Destination color override is policy-owned","requirements":["CAL-011","CAL-014","MAC-012"],"input_patch":{"policy":{"destination":{"color":"destination-color-7"}}},"expected":{"selection":"included","operation":"create","primary_reason_code":"create_missing_copy","desired_fields":{"color":"destination-color-7"}}},
+    {"case_id":"privacy.free_details_preserved_by_default_rule","title":"Non-redacted details preserve source-free availability","requirements":["CAL-011","CAL-012","MAC-012"],"input_patch":{"policy":{"privacy":{"preset":"private_details","copy_summary":true}},"source":{"availability":"free"}},"expected":{"selection":"included","operation":"create","primary_reason_code":"create_missing_copy","reason_codes_include":["free_preserved"],"desired_fields":{"transparency":"transparent","visibility":"private"}}}
+  ]
+}

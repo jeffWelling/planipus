@@ -1,0 +1,51 @@
+{
+  "$schema": "../../schemas/case-bundle.schema.json",
+  "contract_version": 1,
+  "kind": "hours_evaluation",
+  "defaults": {
+    "input": {
+      "mode": "overlaps_profile",
+      "event": {"start": "2026-07-20T17:00:00Z", "end": "2026-07-20T18:00:00Z"},
+      "profile": {
+        "profile_ref": "work-hours",
+        "revision": 1,
+        "timezone": "America/Vancouver",
+        "dst_resolution": {"ambiguous": "earlier_offset", "nonexistent": "shift_forward_by_gap"},
+        "weekly": [
+          {"weekday": 1, "start": "09:00:00", "end": "17:00:00", "end_day_offset": 0},
+          {"weekday": 2, "start": "09:00:00", "end": "17:00:00", "end_day_offset": 0},
+          {"weekday": 3, "start": "09:00:00", "end": "17:00:00", "end_day_offset": 0},
+          {"weekday": 4, "start": "09:00:00", "end": "17:00:00", "end_day_offset": 0},
+          {"weekday": 5, "start": "09:00:00", "end": "17:00:00", "end_day_offset": 0}
+        ],
+        "exceptions": []
+      }
+    }
+  },
+  "cases": [
+    {"case_id":"hours.all_times_outside_profile","title":"All-times ignores profile windows","requirements":["CAL-010","MAC-012"],"input_patch":{"mode":"all_times","event":{"start":"2026-07-20T05:00:00Z","end":"2026-07-20T06:00:00Z"}},"expected":{"included":true,"reason_code":"all_times"}},
+    {"case_id":"hours.overlap_inside","title":"Event inside work hours overlaps","requirements":["CAL-010","MAC-012"],"input_patch":{},"expected":{"included":true,"reason_code":"overlaps_hours","matched_intervals":[{"start":"2026-07-20T16:00:00Z","end":"2026-07-21T00:00:00Z"}]}},
+    {"case_id":"hours.event_ends_at_open_excluded","title":"Half-open event ending at open is excluded","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-07-20T15:00:00Z","end":"2026-07-20T16:00:00Z"}},"expected":{"included":false,"reason_code":"outside_hours"}},
+    {"case_id":"hours.event_starts_at_close_excluded","title":"Half-open event starting at close is excluded","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-07-21T00:00:00Z","end":"2026-07-21T01:00:00Z"}},"expected":{"included":false,"reason_code":"outside_hours"}},
+    {"case_id":"hours.exact_open_close_included","title":"Exact work interval is included","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-07-20T16:00:00Z","end":"2026-07-21T00:00:00Z"}},"expected":{"included":true,"reason_code":"overlaps_hours"}},
+    {"case_id":"hours.partial_left_full_duration","title":"Left partial overlap includes full event","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-07-20T15:30:00Z","end":"2026-07-20T16:30:00Z"}},"expected":{"included":true,"reason_code":"overlaps_hours"}},
+    {"case_id":"hours.partial_right_full_duration","title":"Right partial overlap includes full event","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-07-20T23:30:00Z","end":"2026-07-21T00:30:00Z"}},"expected":{"included":true,"reason_code":"overlaps_hours"}},
+    {"case_id":"hours.contained_exact","title":"Exact event is contained","requirements":["CAL-010","MAC-012"],"input_patch":{"mode":"contained_in_profile","event":{"start":"2026-07-20T16:00:00Z","end":"2026-07-21T00:00:00Z"}},"expected":{"included":true,"reason_code":"contained_in_hours"}},
+    {"case_id":"hours.contained_partial_excluded","title":"Partial event is not contained","requirements":["CAL-010","MAC-012"],"input_patch":{"mode":"contained_in_profile","event":{"start":"2026-07-20T15:30:00Z","end":"2026-07-20T16:30:00Z"}},"expected":{"included":false,"reason_code":"not_contained_in_hours"}},
+    {"case_id":"hours.overlap_across_lunch_gap","title":"Any overlap across a lunch gap is included","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-07-20T18:30:00Z","end":"2026-07-20T20:30:00Z"},"profile":{"weekly":[{"weekday":1,"start":"09:00:00","end":"12:00:00","end_day_offset":0},{"weekday":1,"start":"13:00:00","end":"17:00:00","end_day_offset":0}]}},"expected":{"included":true,"reason_code":"overlaps_hours"}},
+    {"case_id":"hours.contained_across_gap_excluded","title":"Contained mode requires one concrete interval","requirements":["CAL-010","MAC-012"],"input_patch":{"mode":"contained_in_profile","event":{"start":"2026-07-20T18:30:00Z","end":"2026-07-20T20:30:00Z"},"profile":{"weekly":[{"weekday":1,"start":"09:00:00","end":"12:00:00","end_day_offset":0},{"weekday":1,"start":"13:00:00","end":"17:00:00","end_day_offset":0}]}},"expected":{"included":false,"reason_code":"not_contained_in_hours"}},
+    {"case_id":"hours.overnight_before_midnight","title":"Overnight interval matches before midnight","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-07-21T06:00:00Z","end":"2026-07-21T07:00:00Z"},"profile":{"weekly":[{"weekday":1,"start":"22:00:00","end":"06:00:00","end_day_offset":1}]}},"expected":{"included":true,"reason_code":"overlaps_hours"}},
+    {"case_id":"hours.overnight_after_midnight","title":"Overnight interval matches after midnight","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-07-21T12:00:00Z","end":"2026-07-21T12:30:00Z"},"profile":{"weekly":[{"weekday":1,"start":"22:00:00","end":"06:00:00","end_day_offset":1}]}},"expected":{"included":true,"reason_code":"overlaps_hours"}},
+    {"case_id":"hours.multi_day_any_overlap","title":"Multi-day event uses any positive overlap","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-07-19T12:00:00Z","end":"2026-07-22T12:00:00Z"}},"expected":{"included":true,"reason_code":"overlaps_hours"}},
+    {"case_id":"hours.closed_exception","title":"Closed exception removes weekly hours","requirements":["CAL-010","MAC-012"],"input_patch":{"profile":{"exceptions":[{"date":"2026-07-20","kind":"closed"}]}},"expected":{"included":false,"reason_code":"outside_hours"}},
+    {"case_id":"hours.replace_exception","title":"Replace exception replaces weekly hours","requirements":["CAL-010","MAC-012"],"input_patch":{"profile":{"exceptions":[{"date":"2026-07-20","kind":"replace","intervals":[{"start":"10:00:00","end":"14:00:00","end_day_offset":0}]}]}},"expected":{"included":true,"reason_code":"overlaps_hours"}},
+    {"case_id":"hours.add_exception","title":"Add exception augments an empty date","requirements":["CAL-010","MAC-012"],"input_patch":{"profile":{"weekly":[],"exceptions":[{"date":"2026-07-20","kind":"add","intervals":[{"start":"09:00:00","end":"12:00:00","end_day_offset":0}]}]}},"expected":{"included":true,"reason_code":"overlaps_hours"}},
+    {"case_id":"hours.remove_exception","title":"Remove exception subtracts local hours","requirements":["CAL-010","MAC-012"],"input_patch":{"profile":{"exceptions":[{"date":"2026-07-20","kind":"remove","intervals":[{"start":"09:30:00","end":"11:30:00","end_day_offset":0}]}]}},"expected":{"included":false,"reason_code":"outside_hours"}},
+    {"case_id":"hours.cross_timezone_instant","title":"Event instant is evaluated in profile timezone","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-07-20T17:00:00Z","end":"2026-07-20T18:00:00Z"}},"expected":{"included":true,"reason_code":"overlaps_hours"}},
+    {"case_id":"hours.spring_gap_shift","title":"Nonexistent boundary shifts forward by the gap","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-03-08T10:30:00Z","end":"2026-03-08T11:00:00Z"},"profile":{"weekly":[{"weekday":7,"start":"02:30:00","end":"04:00:00","end_day_offset":0}]}},"expected":{"included":true,"reason_code":"overlaps_hours","diagnostics_include":["dst_nonexistent_shifted"]}},
+    {"case_id":"hours.spring_gap_reject","title":"Nonexistent boundary can reject evaluation","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-03-08T10:30:00Z","end":"2026-03-08T11:00:00Z"},"profile":{"dst_resolution":{"ambiguous":"earlier_offset","nonexistent":"reject"},"weekly":[{"weekday":7,"start":"02:30:00","end":"04:00:00","end_day_offset":0}]}},"expected":{"included":false,"reason_code":"dst_resolution_rejected"}},
+    {"case_id":"hours.fall_fold_earlier","title":"Ambiguous boundary selects earlier offset","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-11-01T08:45:00Z","end":"2026-11-01T09:00:00Z"},"profile":{"weekly":[{"weekday":7,"start":"01:30:00","end":"02:30:00","end_day_offset":0}]}},"expected":{"included":true,"reason_code":"overlaps_hours","diagnostics_include":["dst_ambiguous_earlier"],"matched_intervals":[{"start":"2026-11-01T08:30:00Z","end":"2026-11-01T10:30:00Z"}]}},
+    {"case_id":"hours.fall_fold_later","title":"Ambiguous boundary selects later offset","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-11-01T09:45:00Z","end":"2026-11-01T10:00:00Z"},"profile":{"dst_resolution":{"ambiguous":"later_offset","nonexistent":"shift_forward_by_gap"},"weekly":[{"weekday":7,"start":"01:30:00","end":"02:30:00","end_day_offset":0}]}},"expected":{"included":true,"reason_code":"overlaps_hours","diagnostics_include":["dst_ambiguous_later"],"matched_intervals":[{"start":"2026-11-01T09:30:00Z","end":"2026-11-01T10:30:00Z"}]}},
+    {"case_id":"hours.quarter_hour_timezone","title":"Quarter-hour timezone evaluates correctly","requirements":["CAL-010","MAC-012"],"input_patch":{"event":{"start":"2026-07-20T03:30:00Z","end":"2026-07-20T04:00:00Z"},"profile":{"timezone":"Asia/Kathmandu","weekly":[{"weekday":1,"start":"09:00:00","end":"17:00:00","end_day_offset":0}]}},"expected":{"included":true,"reason_code":"overlaps_hours"}}
+  ]
+}

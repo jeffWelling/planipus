@@ -1,0 +1,99 @@
+image:
+  repository: registry.example.invalid/planipus
+  tag: "0.1.0"
+  digest: ""
+  pullPolicy: IfNotPresent
+
+process:
+  api: /cnb/process/api
+  scheduler: /cnb/process/scheduler
+  worker: /cnb/process/worker
+
+existingSecret: planipus-secrets
+
+config:
+  publicUrl: https://planipus.example.invalid
+  providerMode: fake
+  masterKeyId: cluster-v1
+  sessionTtlSeconds: 43200
+  schedulerIntervalMs: 15000
+  workerIntervalMs: 1000
+  jobLeaseSeconds: 60
+  migrationAttempts: 60
+
+service:
+  port: 80
+
+ingress:
+  enabled: false
+  className: nginx
+  host: planipus.example.invalid
+  tlsSecretName: planipus-tls
+  annotations: {}
+
+persistence:
+  enabled: true
+  storageClassName: ""
+  size: 10Gi
+  accessModes:
+    - ReadWriteOnce
+
+postgresql:
+  enabled: true
+  existingAdminSecret: planipus-postgres-admin
+  image:
+    repository: registry.example.invalid/library/postgres
+    tag: "17.7-bookworm"
+    digest: ""
+    pullPolicy: IfNotPresent
+  database: planipus
+  adminUsername: planipus_admin
+  username: planipus
+  dataPath: /var/lib/postgresql/data/pgdata
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+resources:
+  api:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  scheduler:
+    requests:
+      cpu: 25m
+      memory: 96Mi
+    limits:
+      cpu: 300m
+      memory: 384Mi
+  worker:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+networkPolicy:
+  enabled: true
+  ingressNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: ingress-nginx
+  dnsNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: kube-system
+  additionalEgress: []
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
