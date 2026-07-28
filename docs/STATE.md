@@ -66,6 +66,16 @@ continuously only while its own Kubernetes workload is healthy.
   deleted copies under a fresh deterministic generation, and holds every marker
   mismatch without writing. Explicit UI/API recovery rechecks held copies before
   retrying; repeated intent payloads remain distinct through a monotonic sequence.
+- Configurable per-policy destination-edit behavior (`destination_edits`):
+  direct edits/deletions of managed copies restore with a recorded sync notice
+  by default, restore silently, or hold untouched for an explicit
+  restore/keep-and-detach decision through the notices API
+  (`GET /api/v1/notices`, acknowledge, resolve). Holds keep the person's direct
+  change in place, survive safety reconciliation, and resolve only through
+  marker-verified ambiguous recovery or detach. The React interface does not
+  yet render notices, and the Mac edition has not yet adopted the
+  destination-edit modes; both currently keep the previous restore-only
+  behavior surface.
 - A responsive React interface for bootstrap login, labeled account
   connections, source/destination selection, work-hours and privacy policy,
   disclosure preview, activation, health, activity, and Sync Now. The Server

@@ -1,3 +1,5 @@
+import type { DestinationEditPolicy } from "./destination-edits.js";
+
 export type JsonPrimitive = null | boolean | number | string;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
@@ -155,6 +157,11 @@ export interface SyncPolicy {
   destination: {
     color?: string;
   };
+  /** How direct edits/deletions of managed destination copies are handled.
+   * Absent means the notify-by-default behavior; the evaluator ignores this
+   * field because destination divergence is observed by verification, not by
+   * source evaluation. */
+  destination_edits?: DestinationEditPolicy;
 }
 
 export interface DestinationCapabilities {

@@ -21,8 +21,11 @@ import {
 import type { ServerConfig } from "../config.js";
 import type { DatabaseSchema } from "../database/types.js";
 import { safeErrorCode } from "../foundation.js";
+import { isDestinationEditPolicy } from "@planipus/calendar-sync";
+
 import { PostgresJobQueue } from "../jobs/queue.js";
 import { PolicyInputError, PolicyService, type PolicyDraft } from "../policy/service.js";
+import type { NoticeService } from "../sync/notices.js";
 import {
   GoogleOAuthError,
   GoogleOAuthService
@@ -37,6 +40,7 @@ export interface ApiDependencies {
   readonly db: Kysely<DatabaseSchema>;
   readonly sessions: Pick<SessionService, "exchangeBootstrapToken" | "authenticate" | "revoke">;
   readonly policies: Pick<PolicyService, "preview" | "activate" | "list" | "setPaused" | "retryBlocked" | "requestReconcile">;
+  readonly notices?: Pick<NoticeService, "list" | "acknowledge" | "resolve">;
   readonly googleOAuth?: Pick<GoogleOAuthService, "begin" | "complete">;
   readonly planning?: Pick<PlanningService,
     | "preview"
@@ -424,6 +428,49 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
     const job = await dependencies.policies.requestReconcile(sessionFor(request).organizationId, request.params.id);
     return reply.code(202).send({ enqueued: job !== null, job_id: job });
   });
+  app.get<{ Querystring: { scope?: string } }>(
+    "/api/v1/notices",
+    { preHandler: requireSession },
+    async (request, reply) => {
+      if (!dependencies.notices) {
+        return reply.code(503).send(errorDocument("notices_unavailable", request.id));
+      }
+      const scope = request.query.scope === "all" ? "all" : "open";
+      return dependencies.notices.list(sessionFor(request).organizationId, scope);
+    }
+  );
+  app.post<{ Params: { id: string } }>(
+    "/api/v1/notices/:id/acknowledge",
+    protectedMutation,
+    async (request, reply) => {
+      if (!dependencies.notices) {
+        return reply.code(503).send(errorDocument("notices_unavailable", request.id));
+      }
+      await dependencies.notices.acknowledge(sessionFor(request).organizationId, request.params.id);
+      return reply.code(204).send();
+    }
+  );
+  app.post<{ Params: { id: string }; Body: { action?: unknown } }>(
+    "/api/v1/notices/:id/resolve",
+    protectedMutation,
+    async (request, reply) => {
+      if (!dependencies.notices) {
+        return reply.code(503).send(errorDocument("notices_unavailable", request.id));
+      }
+      const action = request.body?.action;
+      if (action !== "restore" && action !== "keep_and_detach") {
+        return reply.code(400).send(errorDocument("invalid_request", request.id));
+      }
+      const session = sessionFor(request);
+      await dependencies.notices.resolve(
+        session.organizationId,
+        session.principalId,
+        request.params.id,
+        action
+      );
+      return reply.code(202).send({ resolution: action });
+    }
+  );
   app.post("/api/v1/sync", protectedMutation, async (request, reply) => {
     const organizationId = sessionFor(request).organizationId;
     const queue = new PostgresJobQueue(dependencies.db);
@@ -520,7 +567,11 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
   app.setErrorHandler(async (error, request, reply) => {
     const code = safeErrorCode(error);
     if (error instanceof PolicyInputError) {
-      const status = error.code === "not_found" ? 404 : error.code === "preview_stale" ? 409 : 400;
+      const status = error.code === "not_found"
+        ? 404
+        : error.code === "preview_stale" || error.code === "hold_stale"
+          ? 409
+          : 400;
       return reply.code(status).send(errorDocument(error.code, request.id));
     }
     if (error instanceof PlanningInputError) {
@@ -557,6 +608,7 @@ async function buildOverviewDocument(db: Kysely<DatabaseSchema>, organizationId:
     pendingEffects,
     deadEffects,
     deadJobs,
+    openNotices,
     recentActivity
   ] = await Promise.all([
     db.selectFrom("organizations")
@@ -641,6 +693,11 @@ async function buildOverviewDocument(db: Kysely<DatabaseSchema>, organizationId:
       .where("organization_id", "=", organizationId)
       .where("state", "=", "dead")
       .executeTakeFirstOrThrow(),
+    db.selectFrom("sync_notices")
+      .select(({ fn }) => fn.countAll<number>().as("count"))
+      .where("organization_id", "=", organizationId)
+      .where("status", "!=", "resolved")
+      .executeTakeFirstOrThrow(),
     db.selectFrom("audit_facts")
       .select(["id", "action", "reason_code", "created_at"])
       .where("organization_id", "=", organizationId)
@@ -682,6 +739,7 @@ async function buildOverviewDocument(db: Kysely<DatabaseSchema>, organizationId:
       ...policies.map((policy) => policy.last_success_at)
     ]),
     pending_effect_count: pendingEffectCount,
+    open_notice_count: Number(openNotices.count),
     connections: connections.map((connection) => ({
       id: connection.id,
       provider: connection.provider,
@@ -850,6 +908,7 @@ function parsePolicyDraft(value: unknown): PolicyDraft | null {
     return null;
   }
   const draft = value as Record<string, unknown>;
+  const destinationEdits = draft["destination_edits"];
   const hours = draft["hours"];
   const hoursProfileId = draft["hours_profile_id"];
   const inlineHoursProfile = draft["hours_profile"];
@@ -870,6 +929,7 @@ function parsePolicyDraft(value: unknown): PolicyDraft | null {
         && hours["mode"] !== "overlaps_profile"
         && hours["mode"] !== "contained_in_profile")
     ))
+    || (destinationEdits !== undefined && !isDestinationEditPolicy(destinationEdits))
     || (hoursProfileId !== undefined && hoursProfileId !== null && typeof hoursProfileId !== "string")
     || (inlineHoursProfile !== undefined && !isRecord(inlineHoursProfile))
     || (horizon !== undefined && (
@@ -951,6 +1011,10 @@ function safeMessage(code: string): string {
     oauth_denied: "Google authorization was cancelled.",
     oauth_callback_invalid: "The Google authorization response is invalid.",
     preview_stale: "The preview is no longer current.",
+    invalid_destination_edits: "The destination-edit behavior setting is invalid.",
+    notices_unavailable: "Sync notices are not available on this installation.",
+    notice_not_resolvable: "This notice does not carry an open decision.",
+    hold_stale: "This copy's held state changed. Refresh and decide again.",
     not_found: "The requested item was not found.",
     web_not_built: "The Planipus web app has not been built yet.",
     internal_error: "Planipus could not complete the request."

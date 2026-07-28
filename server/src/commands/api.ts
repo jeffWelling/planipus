@@ -9,6 +9,7 @@ async function main(): Promise<void> {
     db: runtime.database.db,
     sessions: runtime.sessions,
     policies: runtime.policies,
+    notices: runtime.notices,
     ...(planningProviderWritesEnabled(runtime.config) ? { planning: runtime.planning } : {}),
     ...(runtime.googleOAuth ? { googleOAuth: runtime.googleOAuth } : {})
   });

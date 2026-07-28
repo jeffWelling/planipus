@@ -17,6 +17,7 @@ import {
 } from "../policy/service.js";
 import type { PolicyRuntime } from "../policy/runtime.js";
 import { sourceObservationBasisHash } from "./basis.js";
+import { isDestinationEditHold } from "./notices.js";
 
 const DAY_MILLISECONDS = 86_400_000;
 
@@ -258,8 +259,13 @@ export class PolicyReconciler {
     const intentSequence = Number(existing?.intent_sequence ?? 0)
       + (result.operation === "none" ? 0 : 1);
 
-    if (existing && (blockingDeadEffect || existing.ownership === "ambiguous")) {
-      const status = existing.ownership === "ambiguous" ? "held" : "failed";
+    // A destination-edit hold is a pending user decision, not a failure. A
+    // source change while the decision is open refreshes the shadow-evaluated
+    // recovery payload only; the person's direct destination change stays
+    // untouched until they choose restore or keep-and-detach.
+    const destinationEditHold = existing !== undefined && isDestinationEditHold(existing);
+    if (existing && (blockingDeadEffect || existing.ownership === "ambiguous" || destinationEditHold)) {
+      const status = existing.ownership === "ambiguous" || destinationEditHold ? "held" : "failed";
       const recoveryOperation = recoveryOperationForResult(result);
       await transaction
         .updateTable("projections")

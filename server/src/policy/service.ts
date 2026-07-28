@@ -1,14 +1,16 @@
 import { sql, type Kysely } from "kysely";
-import type {
-  DesiredCopy,
-  DestinationCapabilities,
-  HoursProfile,
-  HoursException,
-  PolicyEvaluationInput,
-  PolicyEvaluationResult,
-  SourceObservation,
-  SyncPolicy,
-  WeeklyInterval
+import {
+  isDestinationEditPolicy,
+  normalizeDestinationEditPolicy,
+  type DesiredCopy,
+  type DestinationCapabilities,
+  type HoursProfile,
+  type HoursException,
+  type PolicyEvaluationInput,
+  type PolicyEvaluationResult,
+  type SourceObservation,
+  type SyncPolicy,
+  type WeeklyInterval
 } from "@planipus/calendar-sync";
 
 import type { DatabaseSchema } from "../database/types.js";
@@ -30,6 +32,7 @@ export interface PolicyDraft {
   readonly privacy: SyncPolicy["privacy"];
   readonly selection: SyncPolicy["selection"];
   readonly destination?: SyncPolicy["destination"];
+  readonly destination_edits?: SyncPolicy["destination_edits"];
   readonly horizon?: { readonly past_days: number; readonly future_days: number };
   readonly [key: string]: unknown;
 }
@@ -88,7 +91,8 @@ export function compilePolicyDraft(
     },
     privacy: draft.privacy,
     selection: draft.selection,
-    destination: draft.destination ?? {}
+    destination: draft.destination ?? {},
+    destination_edits: normalizeDestinationEditPolicy(draft.destination_edits)
   };
 }
 
@@ -119,6 +123,12 @@ export class PolicyService {
     }
     if (draft.hours_profile_id && draft.hours_profile) {
       throw new PolicyInputError("invalid_hours_profile", "choose either a saved or inline hours profile");
+    }
+    if (draft.destination_edits !== undefined && !isDestinationEditPolicy(draft.destination_edits)) {
+      throw new PolicyInputError(
+        "invalid_destination_edits",
+        "destination-edit behavior must set version 1 with on_edit and on_delete modes"
+      );
     }
     const inlineHoursProfile = draft.hours_profile
       ? validateInlineHoursProfile(draft.hours_profile)
@@ -908,7 +918,10 @@ function policyDraftForPersistence(draft: PolicyDraft, hoursProfileId: string | 
     hours: {
       mode,
       ...(mode !== "all_times" && hoursProfileId ? { profile_ref: hoursProfileId } : {})
-    }
+    },
+    // The stored policy is explicit: an omitted destination-edit choice is
+    // persisted as the concrete default rather than an implicit behavior.
+    destination_edits: normalizeDestinationEditPolicy(draft.destination_edits)
   };
 }
 

@@ -1,4 +1,10 @@
-import type { DesiredCopy } from "@planipus/calendar-sync";
+import {
+  normalizeDestinationEditPolicy,
+  planDestinationEditResponse,
+  type DesiredCopy,
+  type DestinationEditPolicy,
+  type DestinationEditResponse
+} from "@planipus/calendar-sync";
 import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { DatabaseSchema } from "../database/types.js";
@@ -8,6 +14,7 @@ import type { AccessTokenBroker } from "../providers/router.js";
 import { ProviderRouter } from "../providers/router.js";
 import { ProviderError, type ProviderEventLookup } from "../providers/types.js";
 import { eventBelongsToProjection } from "./effects.js";
+import { noticeDetailForDesiredCopy, recordSyncNotice } from "./notices.js";
 
 export const DESTINATION_VERIFICATION_INTERVAL_MILLISECONDS = 15 * 60_000;
 export const MAX_DESTINATION_VERIFICATIONS_PER_JOB = 100;
@@ -26,6 +33,7 @@ interface VerificationTarget {
   readonly calendarRemoteId: string;
   readonly connectionId: string;
   readonly provider: "google" | "fake";
+  readonly destinationEdits: DestinationEditPolicy;
 }
 
 export type DestinationVerificationDecision =
@@ -44,10 +52,13 @@ export interface DestinationVerificationSummary {
 
 /**
  * Verifies a bounded oldest-first slice of source-authoritative destination
- * copies. A read is always performed before a repair is scheduled. Missing
- * copies are recreated; changed copies are restored only when every private
- * ownership marker still matches the durable projection. Unknown ownership is
- * held for review and is never overwritten.
+ * copies. A read is always performed before a repair is scheduled. What
+ * happens after an owned copy is found edited or deleted follows the policy's
+ * destination-edit configuration: restore silently, restore and record a
+ * user-facing notice (default), or hold the copy untouched for an explicit
+ * restore/detach decision. Restores require every private ownership marker to
+ * still match the durable projection. Unknown ownership is held for review and
+ * is never overwritten.
  */
 export class DestinationVerifier {
   public constructor(
@@ -106,13 +117,21 @@ export class DestinationVerifier {
             }
             break;
           case "missing":
-          case "drifted":
-            if (await this.scheduleRepair(organizationId, target, decision, now)) {
+          case "drifted": {
+            const plan = planDestinationEditResponse(target.destinationEdits, decision.kind);
+            if (plan.response === "hold") {
+              if (await this.holdDestinationEdit(organizationId, target, decision, plan, now)) {
+                held += 1;
+              } else {
+                deferred += 1;
+              }
+            } else if (await this.scheduleRepair(organizationId, target, decision, plan, now)) {
               repairsScheduled += 1;
             } else {
               deferred += 1;
             }
             break;
+          }
         }
       } catch (error) {
         if (error instanceof ProviderError && error.code === "provider_auth") {
@@ -200,6 +219,7 @@ export class DestinationVerifier {
         "projection.destination_etag",
         "projection.desired_hash",
         "projection.desired_state",
+        "policy.policy_document",
         "calendar.remote_id as calendar_remote_id",
         "calendar.writable as calendar_writable",
         "connection.id as connection_id",
@@ -236,7 +256,10 @@ export class DestinationVerifier {
       desiredState: row.desired_state as unknown as DesiredCopy,
       calendarRemoteId: row.calendar_remote_id,
       connectionId: row.connection_id,
-      provider: row.provider
+      provider: row.provider,
+      destinationEdits: normalizeDestinationEditPolicy(
+        (row.policy_document as Record<string, unknown>)["destination_edits"]
+      )
     };
   }
 
@@ -244,6 +267,7 @@ export class DestinationVerifier {
     organizationId: string,
     target: VerificationTarget,
     decision: Extract<DestinationVerificationDecision, { kind: "missing" | "drifted" }>,
+    plan: Extract<DestinationEditResponse, { response: "repair" }>,
     now: Date
   ): Promise<boolean> {
     return this.db.transaction().execute(async (transaction) => {
@@ -371,13 +395,130 @@ export class DestinationVerifier {
         organizationId,
         target,
         "copy.repair_scheduled",
-        decision.kind === "missing" ? "destination_missing" : "destination_drift",
+        plan.safe_error_code,
         {
           operation,
           previous_generation: target.generation,
           repair_generation: repair.generation
         },
         desiredHash
+      );
+      if (plan.notice) {
+        await recordSyncNotice(transaction, {
+          organizationId,
+          policyId: target.policyId,
+          projectionId: target.projectionId,
+          kind: plan.notice,
+          detail: noticeDetailForDesiredCopy(decision.kind, repair.desiredState)
+        });
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Freeze an owned-but-edited (or deleted) copy for an explicit decision. The
+   * projection stays attached with its validated recovery evidence so the
+   * notice's `restore` action can replay it through marker-verified ambiguous
+   * recovery, while `keep_and_detach` releases the copy instead. Until then no
+   * provider write happens and the person's direct change stays in place.
+   */
+  private async holdDestinationEdit(
+    organizationId: string,
+    target: VerificationTarget,
+    decision: Extract<DestinationVerificationDecision, { kind: "missing" | "drifted" }>,
+    plan: Extract<DestinationEditResponse, { response: "hold" }>,
+    now: Date
+  ): Promise<boolean> {
+    return this.db.transaction().execute(async (transaction) => {
+      const policy = await transaction
+        .selectFrom("sync_policies")
+        .select(["status", "revision"])
+        .where("organization_id", "=", organizationId)
+        .where("id", "=", target.policyId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (
+        !policy
+        || policy.status !== "active"
+        || policy.revision !== target.policyRevision
+      ) {
+        return false;
+      }
+      const current = await transaction
+        .selectFrom("projections")
+        .select([
+          "status",
+          "ownership",
+          "policy_revision",
+          "generation",
+          "destination_event_id",
+          "destination_etag",
+          "desired_hash",
+          "desired_state"
+        ])
+        .where("organization_id", "=", organizationId)
+        .where("id", "=", target.projectionId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (
+        !current
+        || current.status !== "converged"
+        || current.ownership !== "attached"
+        || current.policy_revision !== target.policyRevision
+        || current.generation !== target.generation
+        || current.destination_event_id !== target.destinationEventId
+        || current.destination_etag !== target.destinationRevision
+        || current.desired_hash !== target.desiredHash
+        || !current.desired_state
+      ) {
+        return false;
+      }
+      const unfinished = await transaction
+        .selectFrom("outbox_effects")
+        .select("id")
+        .where("projection_id", "=", target.projectionId)
+        .where("state", "in", ["pending", "leased", "retry"])
+        .executeTakeFirst();
+      if (unfinished) {
+        return false;
+      }
+      const desired = current.desired_state as unknown as DesiredCopy;
+      if (
+        desired.provenance?.policy_ref !== target.policyId
+        || desired.provenance.projection_ref !== target.projectionId
+        || desired.provenance.generation !== target.generation
+        || this.runtime.hash(desired) !== target.desiredHash
+      ) {
+        return false;
+      }
+      await transaction
+        .updateTable("projections")
+        .set({
+          status: "held",
+          recovery_operation: decision.kind === "missing" ? "create" : "update",
+          safe_error_code: plan.safe_error_code,
+          ...(decision.kind === "drifted"
+            ? { destination_etag: decision.observedRevision }
+            : {}),
+          updated_at: now
+        })
+        .where("id", "=", target.projectionId)
+        .executeTakeFirstOrThrow();
+      await recordSyncNotice(transaction, {
+        organizationId,
+        policyId: target.policyId,
+        projectionId: target.projectionId,
+        kind: plan.notice,
+        detail: noticeDetailForDesiredCopy(decision.kind, desired)
+      });
+      await this.audit(
+        transaction,
+        organizationId,
+        target,
+        "copy.held",
+        plan.safe_error_code,
+        { operation: decision.kind === "missing" ? "create" : "update" }
       );
       return true;
     });

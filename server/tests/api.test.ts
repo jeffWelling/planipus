@@ -528,6 +528,7 @@ function fixtureDatabase(options: FixtureOptions = {}): {
             : []
           : [{ count: 2 }];
         case "scheduled_jobs": return [{ count: 0 }];
+        case "sync_notices": return [{ count: 0 }];
         case "audit_facts": return [{
           id: "audit-1",
           action: "policy.activated",
