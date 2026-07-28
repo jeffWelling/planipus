@@ -72,10 +72,18 @@ continuously only while its own Kubernetes workload is healthy.
   restore/keep-and-detach decision through the notices API
   (`GET /api/v1/notices`, acknowledge, resolve). Holds keep the person's direct
   change in place, survive safety reconciliation, and resolve only through
-  marker-verified ambiguous recovery or detach. The React interface does not
-  yet render notices, and the Mac edition has not yet adopted the
-  destination-edit modes; both currently keep the previous restore-only
-  behavior surface.
+  marker-verified ambiguous recovery or detach. The React overview renders
+  open notices with the same decide-or-dismiss actions. Email delivery of
+  notices is a planned design (`NOTIFICATIONS.md`), not implemented.
+- The Mac edition implements the same destination-edit modes in its
+  coordinator and stores (schema 6 adds hold/detach columns and a local
+  `sync_notices` table): direct edits of owned copies — previously adopted
+  silently by revision refresh — now restore with a notice by default, and
+  holds freeze the copy until `resolveNotice(restore | keepAndDetach)`.
+  Mac notices have coordinator/store APIs and tests but no menu-bar UI yet,
+  and the updated Swift suite has not been run in this Linux worktree (no
+  Swift toolchain); running `swift test --package-path macos` on a Mac is a
+  required verification step before relying on the Mac slice.
 - A responsive React interface for bootstrap login, labeled account
   connections, source/destination selection, work-hours and privacy policy,
   disclosure preview, activation, health, activity, and Sync Now. The Server

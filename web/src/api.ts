@@ -6,6 +6,7 @@ import type {
   Preview,
   PreviewRequest,
   Session,
+  SyncNotice,
   PlanningDraft,
   PlanningPreview,
   PlanningRule,
@@ -52,11 +53,34 @@ interface CalendarDocument {
   primary_calendar: boolean;
 }
 
+interface SyncNoticeDocument {
+  id: string;
+  kind: SyncNotice["kind"];
+  status: SyncNotice["status"];
+  resolution: "restore" | "keep_and_detach" | null;
+  policy_id: string;
+  policy_name: string;
+  projection_id: string;
+  destination_calendar: string;
+  destination_event_id: string | null;
+  requires_decision: boolean;
+  detail?: {
+    observed?: string;
+    copy_summary?: string;
+    copy_timing?:
+      | { kind: "timed"; start_instant: string; end_instant: string }
+      | { kind: "all_day"; start_date: string; end_date: string };
+  } | null;
+  created_at: string;
+  updated_at: string;
+}
+
 interface OverviewDocument {
   installation_name: string;
   status: Overview["status"];
   last_success_at: string | null;
   pending_effect_count: number;
+  open_notice_count?: number;
   connections: Array<ConnectionDocument & { calendars: CalendarDocument[] }>;
   bridges: Array<{
     id: string;
@@ -228,6 +252,7 @@ function mapOverview(document: OverviewDocument): Overview {
     status: document.status,
     ...(document.last_success_at ? { lastSuccessAt: document.last_success_at } : {}),
     pendingEffectCount: document.pending_effect_count,
+    openNoticeCount: document.open_notice_count ?? 0,
     connections: document.connections.map((connection) => mapConnection(connection, connection.calendars)),
     bridges: document.bridges.map((bridge) => ({
       id: bridge.id,
@@ -272,6 +297,28 @@ function mapPlanningRule(document: PlanningRuleDocument): PlanningRule {
       ...(occurrence.end_at ? { endAt: occurrence.end_at } : {})
     })),
     ...(document.last_success_at ? { lastSuccessAt: document.last_success_at } : {})
+  };
+}
+
+function mapNotice(document: SyncNoticeDocument): SyncNotice {
+  const timing = document.detail?.copy_timing;
+  return {
+    id: document.id,
+    kind: document.kind,
+    status: document.status,
+    ...(document.resolution ? { resolution: document.resolution } : {}),
+    policyId: document.policy_id,
+    policyName: document.policy_name,
+    destinationCalendar: document.destination_calendar,
+    ...(document.destination_event_id ? { destinationEventId: document.destination_event_id } : {}),
+    requiresDecision: document.requires_decision,
+    ...(document.detail?.copy_summary ? { copySummary: document.detail.copy_summary } : {}),
+    ...(timing?.kind === "timed"
+      ? { copyStartAt: timing.start_instant, copyEndAt: timing.end_instant, copyAllDay: false }
+      : timing?.kind === "all_day"
+        ? { copyStartAt: timing.start_date, copyEndAt: timing.end_date, copyAllDay: true }
+        : {}),
+    createdAt: document.created_at
   };
 }
 
@@ -488,6 +535,17 @@ export const api = {
     });
     return { policyId: policy.id };
   },
+
+  async notices(): Promise<SyncNotice[]> {
+    return (await request<SyncNoticeDocument[]>("/api/v1/notices")).map(mapNotice);
+  },
+  acknowledgeNotice: (noticeId: string) =>
+    request<void>(`/api/v1/notices/${encodeURIComponent(noticeId)}/acknowledge`, { method: "POST" }),
+  resolveNotice: (noticeId: string, action: "restore" | "keep_and_detach") =>
+    request<{ resolution: string }>(`/api/v1/notices/${encodeURIComponent(noticeId)}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ action })
+    }),
 
   pause: (policyId: string) =>
     request<void>(`/api/v1/policies/${encodeURIComponent(policyId)}/pause`, { method: "POST" }),

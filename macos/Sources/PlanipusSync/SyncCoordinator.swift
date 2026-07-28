@@ -373,6 +373,13 @@ public actor SyncCoordinator {
         )
         let projection = try await repository.projection(for: key)
 
+        // A detached copy is deliberately unmanaged, and a destination-edit
+        // hold is a pending user decision. Neither may produce provider writes
+        // until the person acts through notice resolution.
+        if let projection, projection.detached || projection.hold != nil {
+            return
+        }
+
         // A destination/account change is a move, not an update. Delete the
         // old owned projection first; the next safety pass creates the new one.
         if let projection, projection.destinationEndpoint != policy.destinationEndpoint {
@@ -403,25 +410,51 @@ public actor SyncCoordinator {
                 let observed = try await verifiedDestination(projection: projection, policyID: policy.id)
                 if let observed {
                     expectedRevision = observed.providerRevision
-                    if projection.desiredFingerprint == fingerprint {
-                        if projection.providerRevision != observed.providerRevision {
-                            try await repository.saveProjection(
-                                StoredProjection(
-                                    key: projection.key,
-                                    destinationEndpoint: projection.destinationEndpoint,
-                                    destinationEventID: projection.destinationEventID,
-                                    desiredFingerprint: projection.desiredFingerprint,
-                                    providerRevision: observed.providerRevision,
-                                    updatedAt: clock.now()
-                                )
+                    // A revision the projection did not record means the owned
+                    // copy was changed directly on the destination. The source
+                    // stays authoritative; the policy chooses how loudly.
+                    let editedDirectly = projection.providerRevision != nil
+                        && projection.providerRevision != observed.providerRevision
+                    if editedDirectly {
+                        switch policy.effectiveDestinationEdits.onEdit {
+                        case .holdForReview:
+                            try await holdForDecision(
+                                projection: projection,
+                                hold: .edit,
+                                noticeKind: .copyEditHeld,
+                                desired: desiredCopy
                             )
+                            return
+                        case .restoreAndNotify:
+                            try await recordNotice(kind: .copyEditReverted, key: key, desired: desiredCopy)
+                            operation = .update
+                        case .restore:
+                            operation = .update
                         }
+                    } else if projection.desiredFingerprint == fingerprint {
                         return
+                    } else {
+                        operation = .update
                     }
-                    operation = .update
+                } else {
+                    // The managed copy is gone from the destination. A marker
+                    // mismatch throws before this point; recreation reuses the
+                    // stable destination ID below.
+                    switch policy.effectiveDestinationEdits.onDelete {
+                    case .holdForReview:
+                        try await holdForDecision(
+                            projection: projection,
+                            hold: .delete,
+                            noticeKind: .copyDeleteHeld,
+                            desired: desiredCopy
+                        )
+                        return
+                    case .restoreAndNotify:
+                        try await recordNotice(kind: .copyDeleteRestored, key: key, desired: desiredCopy)
+                    case .restore:
+                        break
+                    }
                 }
-                // A directly deleted managed copy is recreated with its stable
-                // destination ID. A marker mismatch throws before this point.
             }
             let destinationID = projection?.destinationEventID ?? GoogleEventID.deterministic(
                 installationID: installationID,
@@ -432,7 +465,7 @@ public actor SyncCoordinator {
             )
             try await enqueue(
                 operation: operation,
-                event: event,
+                sourceRevision: event.providerRevision,
                 policy: policy,
                 key: key,
                 destinationEndpoint: policy.destinationEndpoint,
@@ -464,7 +497,7 @@ public actor SyncCoordinator {
         }
         try await enqueue(
             operation: .delete,
-            event: event,
+            sourceRevision: event.providerRevision,
             policy: policy,
             key: key,
             destinationEndpoint: projection.destinationEndpoint,
@@ -473,6 +506,169 @@ public actor SyncCoordinator {
             desiredCopy: nil,
             fingerprint: projection.desiredFingerprint
         )
+    }
+
+    /// Freeze an owned-but-changed copy for an explicit decision. The person's
+    /// direct change stays on the destination; a notice carries the decision.
+    private func holdForDecision(
+        projection: StoredProjection,
+        hold: DestinationEditHold,
+        noticeKind: SyncNoticeKind,
+        desired: DesiredCopy
+    ) async throws {
+        var held = projection
+        held.hold = hold
+        held.updatedAt = clock.now()
+        try await repository.saveProjection(held)
+        try await recordNotice(kind: noticeKind, key: projection.key, desired: desired)
+    }
+
+    private func recordNotice(
+        kind: SyncNoticeKind,
+        key: ProjectionKey,
+        desired: DesiredCopy
+    ) async throws {
+        try await repository.recordNotice(
+            SyncNotice(
+                projectionKey: key,
+                kind: kind,
+                copySummary: desired.summary,
+                copyStart: desired.start,
+                copyEnd: desired.end,
+                copyIsAllDay: desired.isAllDay,
+                createdAt: clock.now()
+            )
+        )
+    }
+
+    public func openNotices() async throws -> [SyncNotice] {
+        try await repository.notices(includeResolved: false)
+    }
+
+    /// Marking a notice as seen is idempotent; resolved notices are unchanged.
+    public func acknowledgeNotice(id: UUID) async throws {
+        guard var notice = try await repository.notice(id: id) else {
+            throw SyncNoticeError.noticeNotFound
+        }
+        guard notice.status == .unread else { return }
+        notice.status = .acknowledged
+        notice.updatedAt = clock.now()
+        try await repository.updateNotice(notice)
+    }
+
+    /// Resolve a held destination-edit notice. `restore` re-applies the
+    /// source-authoritative copy (or removes it when the source no longer
+    /// projects here); `keepAndDetach` keeps the person's direct change and
+    /// stops managing the copy. The run slot serializes this decision against
+    /// concurrent polling passes.
+    public func resolveNotice(id: UUID, action: SyncNoticeResolution) async throws {
+        await acquireRunSlot()
+        defer { releaseRunSlot() }
+        guard let notice = try await repository.notice(id: id) else {
+            throw SyncNoticeError.noticeNotFound
+        }
+        guard notice.kind.carriesDecision, notice.status != .resolved else {
+            throw SyncNoticeError.noticeNotResolvable
+        }
+        guard var projection = try await repository.projection(for: notice.projectionKey),
+              projection.hold != nil,
+              !projection.detached
+        else {
+            throw SyncNoticeError.holdStale
+        }
+        projection.hold = nil
+        projection.updatedAt = clock.now()
+        switch action {
+        case .keepAndDetach:
+            projection.detached = true
+            try await repository.saveProjection(projection)
+            try await markResolved(notice, as: action)
+        case .restore:
+            try await repository.saveProjection(projection)
+            try await enqueueRestore(projection: projection, key: notice.projectionKey)
+            // The decision is durable once the intent is queued; record it
+            // before draining so a failure below cannot strand a resolved
+            // restore behind an open notice. Then apply the restore now
+            // instead of waiting for the next polling pass, which would
+            // observe the still-drifted copy first and hold it again. If the
+            // write itself fails, the queued intent retries and the copy is
+            // honestly re-held with a fresh notice if drift outlives it.
+            try await markResolved(notice, as: action)
+            try await drainOutbox(epoch: lifecycleEpoch)
+        }
+    }
+
+    private func markResolved(
+        _ notice: SyncNotice,
+        as resolution: SyncNoticeResolution
+    ) async throws {
+        var resolved = notice
+        resolved.status = .resolved
+        resolved.resolution = resolution
+        resolved.updatedAt = clock.now()
+        try await repository.updateNotice(resolved)
+    }
+
+    private func enqueueRestore(projection: StoredProjection, key: ProjectionKey) async throws {
+        guard let policy = try await resolvePolicy(id: key.policyID) else {
+            throw SyncNoticeError.policyUnavailable
+        }
+        let event = try await repository.observations(at: policy.sourceEndpoint).first {
+            $0.id == key.sourceEventID && $0.occurrenceID == key.sourceOccurrenceID
+        }
+        let observed = try await provider.readEvent(
+            at: projection.destinationEndpoint,
+            eventID: projection.destinationEventID
+        )
+        if let observed,
+           !Self.isOwned(observed, policyID: policy.id, projectionID: projection.destinationEventID)
+        {
+            throw ProviderError.ownershipMismatch
+        }
+        if let event {
+            let decision = evaluator.evaluate(
+                event: event,
+                policy: policy,
+                hasExistingProjection: true
+            )
+            if decision.action == .copy, let desired = decision.desiredCopy {
+                try await enqueue(
+                    operation: observed == nil ? .create : .update,
+                    sourceRevision: event.providerRevision,
+                    policy: policy,
+                    key: key,
+                    destinationEndpoint: projection.destinationEndpoint,
+                    destinationEventID: projection.destinationEventID,
+                    expectedProviderRevision: observed?.providerRevision,
+                    desiredCopy: desired,
+                    fingerprint: Self.fingerprint(desired)
+                )
+                return
+            }
+        }
+        // The source event no longer projects to this destination, so the
+        // authoritative state is no copy at all.
+        guard let observed else {
+            try await repository.deleteProjection(for: key)
+            return
+        }
+        try await enqueue(
+            operation: .delete,
+            sourceRevision: event?.providerRevision,
+            policy: policy,
+            key: key,
+            destinationEndpoint: projection.destinationEndpoint,
+            destinationEventID: projection.destinationEventID,
+            expectedProviderRevision: observed.providerRevision,
+            desiredCopy: nil,
+            fingerprint: projection.desiredFingerprint
+        )
+    }
+
+    private func resolvePolicy(id: String) async throws -> SyncPolicy? {
+        if let active = activePolicies[id] { return active }
+        let configuration = try await repository.loadAppConfiguration()
+        return configuration?.bridges.first { $0.policy.id == id }?.policy
     }
 
     private func verifiedDestination(
@@ -492,7 +688,7 @@ public actor SyncCoordinator {
 
     private func enqueue(
         operation: ProviderMutationOperation,
-        event: SourceEvent,
+        sourceRevision: String?,
         policy: SyncPolicy,
         key: ProjectionKey,
         destinationEndpoint: CalendarEndpoint,
@@ -509,15 +705,15 @@ public actor SyncCoordinator {
             destinationEndpoint.calendarID,
             destinationEventID,
             String(policy.revision),
-            event.providerRevision ?? "unversioned",
+            sourceRevision ?? "unversioned",
             fingerprint,
         ].joined(separator: "\u{001f}")
         let mutation = ProviderMutation(
             idempotencyKey: idempotencyKey,
             operation: operation,
             policyID: policy.id,
-            sourceEventID: event.id,
-            sourceOccurrenceID: event.occurrenceID,
+            sourceEventID: key.sourceEventID,
+            sourceOccurrenceID: key.sourceOccurrenceID,
             destinationEndpoint: destinationEndpoint,
             destinationEventID: destinationEventID,
             expectedProviderRevision: expectedProviderRevision,
@@ -773,4 +969,11 @@ public actor SyncCoordinator {
 
 private enum SyncCoordinatorError: Error {
     case lifecycleChanged
+}
+
+public enum SyncNoticeError: Error, Equatable, Sendable {
+    case noticeNotFound
+    case noticeNotResolvable
+    case holdStale
+    case policyUnavailable
 }

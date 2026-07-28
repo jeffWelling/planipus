@@ -34,12 +34,24 @@ public struct ProjectionKey: Codable, Hashable, Sendable {
     }
 }
 
+/// Marks a projection frozen for an explicit destination-edit decision. The
+/// raw values match the Server edition's safe error codes for the same holds.
+public enum DestinationEditHold: String, Codable, Sendable {
+    case edit = "destination_edit_held"
+    case delete = "destination_delete_held"
+}
+
 public struct StoredProjection: Codable, Hashable, Sendable {
     public let key: ProjectionKey
     public var destinationEndpoint: CalendarEndpoint
     public var destinationEventID: String
     public var desiredFingerprint: String
     public var providerRevision: String?
+    /// Non-nil freezes all provider writes for this copy until the person
+    /// resolves the matching notice with restore or keep-and-detach.
+    public var hold: DestinationEditHold?
+    /// A detached copy stays on the destination but is no longer managed.
+    public var detached: Bool
     public var updatedAt: Date
 
     public var destinationCalendarID: String { destinationEndpoint.calendarID }
@@ -51,6 +63,8 @@ public struct StoredProjection: Codable, Hashable, Sendable {
         destinationEventID: String,
         desiredFingerprint: String,
         providerRevision: String? = nil,
+        hold: DestinationEditHold? = nil,
+        detached: Bool = false,
         updatedAt: Date
     ) {
         self.key = key
@@ -58,7 +72,34 @@ public struct StoredProjection: Codable, Hashable, Sendable {
         self.destinationEventID = destinationEventID
         self.desiredFingerprint = desiredFingerprint
         self.providerRevision = providerRevision
+        self.hold = hold
+        self.detached = detached
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case key
+        case destinationEndpoint
+        case destinationEventID
+        case desiredFingerprint
+        case providerRevision
+        case hold
+        case detached
+        case updatedAt
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        key = try container.decode(ProjectionKey.self, forKey: .key)
+        destinationEndpoint = try container.decode(CalendarEndpoint.self, forKey: .destinationEndpoint)
+        destinationEventID = try container.decode(String.self, forKey: .destinationEventID)
+        desiredFingerprint = try container.decode(String.self, forKey: .desiredFingerprint)
+        providerRevision = try container.decodeIfPresent(String.self, forKey: .providerRevision)
+        // Projections stored before destination-edit support decode as unheld
+        // attached copies, preserving the previous behavior exactly.
+        hold = try container.decodeIfPresent(DestinationEditHold.self, forKey: .hold)
+        detached = try container.decodeIfPresent(Bool.self, forKey: .detached) ?? false
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
     }
 }
 
@@ -105,6 +146,73 @@ public struct OutboxEffect: Codable, Hashable, Sendable, Identifiable {
         self.nextAttemptAt = nextAttemptAt
         self.lastError = lastError
         self.createdAt = createdAt
+    }
+}
+
+public enum SyncNoticeKind: String, Codable, CaseIterable, Sendable {
+    case copyEditReverted = "copy_edit_reverted"
+    case copyDeleteRestored = "copy_delete_restored"
+    case copyEditHeld = "copy_edit_held"
+    case copyDeleteHeld = "copy_delete_held"
+
+    /// Held kinds carry an open restore/keep-and-detach decision.
+    public var carriesDecision: Bool {
+        self == .copyEditHeld || self == .copyDeleteHeld
+    }
+}
+
+public enum SyncNoticeStatus: String, Codable, Sendable {
+    case unread
+    case acknowledged
+    case resolved
+}
+
+public enum SyncNoticeResolution: String, Codable, Sendable {
+    case restore
+    case keepAndDetach = "keep_and_detach"
+}
+
+/// User-facing record of a direct edit or deletion of a managed destination
+/// copy. The copy fields repeat only what the destination calendar already
+/// shows (the privacy-transformed summary and timing) — never raw source
+/// event content, matching the notification redaction rules.
+public struct SyncNotice: Codable, Hashable, Sendable, Identifiable {
+    public let id: UUID
+    public let projectionKey: ProjectionKey
+    public let kind: SyncNoticeKind
+    public var status: SyncNoticeStatus
+    public var resolution: SyncNoticeResolution?
+    public let copySummary: String
+    public let copyStart: Date
+    public let copyEnd: Date
+    public let copyIsAllDay: Bool
+    public let createdAt: Date
+    public var updatedAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        projectionKey: ProjectionKey,
+        kind: SyncNoticeKind,
+        status: SyncNoticeStatus = .unread,
+        resolution: SyncNoticeResolution? = nil,
+        copySummary: String,
+        copyStart: Date,
+        copyEnd: Date,
+        copyIsAllDay: Bool = false,
+        createdAt: Date,
+        updatedAt: Date? = nil
+    ) {
+        self.id = id
+        self.projectionKey = projectionKey
+        self.kind = kind
+        self.status = status
+        self.resolution = resolution
+        self.copySummary = copySummary
+        self.copyStart = copyStart
+        self.copyEnd = copyEnd
+        self.copyIsAllDay = copyIsAllDay
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt ?? createdAt
     }
 }
 
@@ -220,6 +328,11 @@ public protocol PlanipusRepository: Sendable {
     func saveProjection(_ projection: StoredProjection) async throws
     func deleteProjection(for key: ProjectionKey) async throws
 
+    func recordNotice(_ notice: SyncNotice) async throws
+    func notices(includeResolved: Bool) async throws -> [SyncNotice]
+    func notice(id: UUID) async throws -> SyncNotice?
+    func updateNotice(_ notice: SyncNotice) async throws
+
     @discardableResult
     func enqueue(_ effect: OutboxEffect) async throws -> Bool
     func dueEffects(at date: Date, limit: Int) async throws -> [OutboxEffect]
@@ -241,5 +354,6 @@ public enum RepositoryError: Error, Equatable, Sendable {
     case unknownBatch
     case mismatchedCalendar
     case unknownEffect
+    case unknownNotice
     case productionPersistenceUnavailable
 }

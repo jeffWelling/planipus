@@ -52,9 +52,12 @@ inside one application container. Local primary keys are UUIDs; remote provider
 IDs are data, never primary keys. OAuth tokens and the database encryption key
 are Keychain items, never columns.
 
-The current SQLCipher schema is version 5. It physically stores `sync_cursors`,
-`observations`, `change_batches`, `staged_observations`, `projections`,
-`outbox_effects`, `store_metadata`, and one versioned `app_configuration` JSON
+The current SQLCipher schema is version 6. It physically stores `sync_cursors`,
+`observations`, `change_batches`, `staged_observations`, `projections` (with
+destination-edit `hold_code` and `detached` columns), `sync_notices` for
+destination-edit records limited to the privacy-transformed copy
+summary/timing, `outbox_effects`, `store_metadata`, and one versioned
+`app_configuration` JSON
 document for non-secret account/bridge/policy presentation state. Dedicated
 calendar discovery, normalized hours/exception, audit, and health tables remain
 target work. This mapping is intentional and must be migrated—not silently

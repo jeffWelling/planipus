@@ -13,6 +13,7 @@ public actor InMemoryPlanipusRepository: PlanipusRepository {
     private var storedEvents: [CalendarEndpoint: [String: SourceEvent]] = [:]
     private var batches: [UUID: StagedBatch] = [:]
     private var projections: [ProjectionKey: StoredProjection] = [:]
+    private var storedNotices: [UUID: SyncNotice] = [:]
     private var effects: [UUID: OutboxEffect] = [:]
     private var effectIDByIdempotencyKey: [String: UUID] = [:]
 
@@ -111,6 +112,28 @@ public actor InMemoryPlanipusRepository: PlanipusRepository {
 
     public func projection(for key: ProjectionKey) -> StoredProjection? {
         projections[key]
+    }
+
+    public func recordNotice(_ notice: SyncNotice) {
+        storedNotices[notice.id] = notice
+    }
+
+    public func notices(includeResolved: Bool) -> [SyncNotice] {
+        storedNotices.values
+            .filter { includeResolved || $0.status != .resolved }
+            .sorted {
+                if $0.createdAt == $1.createdAt { return $0.id.uuidString < $1.id.uuidString }
+                return $0.createdAt < $1.createdAt
+            }
+    }
+
+    public func notice(id: UUID) -> SyncNotice? {
+        storedNotices[id]
+    }
+
+    public func updateNotice(_ notice: SyncNotice) throws {
+        guard storedNotices[notice.id] != nil else { throw RepositoryError.unknownNotice }
+        storedNotices[notice.id] = notice
     }
 
     public func saveProjection(_ projection: StoredProjection) {

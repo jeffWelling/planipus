@@ -211,6 +211,8 @@ not turn an unfinished bridge into a release.
 - [~] Ensure closing the main window leaves sync running only when menu-bar app
       remains running; verify Quit fully stops it.
 - [ ] Add optional local notifications with no titles/details/location/attendees.
+- [ ] Server: deliver sync notices by email per `NOTIFICATIONS.md` (settings
+      document, envelope-encrypted SMTP, test-send gate, immediate mode first).
 - [ ] Add keyboard, VoiceOver, light/dark, contrast, reduced-motion and zoom tests.
 - [ ] Add timezone/DST/clock-change, offline/stale and identical-name UI tests.
 - [!] Run personal→work live Google end-to-end while app runs.

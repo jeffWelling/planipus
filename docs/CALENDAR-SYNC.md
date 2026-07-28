@@ -325,7 +325,10 @@ Rules:
   or touching the destination;
 - notices disclose only what the destination copy already shows (the
   privacy-transformed summary and timing) plus non-sensitive references — no
-  raw source event fields, matching the audit/log redaction rules; and
+  raw source event fields, matching the audit/log redaction rules;
+- both editions implement the same three modes and hold semantics; the Mac
+  edition records notices in its local encrypted store and resolves them
+  through the coordinator, without any server; and
 - automatic write-back from copy to source, or organizer-visible reschedule
   proposals, remain out of scope until a dedicated bidirectional contract
   exists; `hold_for_review` is the safe expression of "my copy edit meant

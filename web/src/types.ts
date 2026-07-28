@@ -39,11 +39,35 @@ export interface Bridge {
   lastSuccessAt?: string;
 }
 
+export type SyncNoticeKind =
+  | "copy_edit_reverted"
+  | "copy_delete_restored"
+  | "copy_edit_held"
+  | "copy_delete_held";
+
+export interface SyncNotice {
+  id: string;
+  kind: SyncNoticeKind;
+  status: "unread" | "acknowledged" | "resolved";
+  resolution?: "restore" | "keep_and_detach";
+  policyId: string;
+  policyName: string;
+  destinationCalendar: string;
+  destinationEventId?: string;
+  requiresDecision: boolean;
+  copySummary?: string;
+  copyStartAt?: string;
+  copyEndAt?: string;
+  copyAllDay?: boolean;
+  createdAt: string;
+}
+
 export interface Overview {
   installationName: string;
   status: StatusTone;
   lastSuccessAt?: string;
   pendingEffectCount: number;
+  openNoticeCount: number;
   connections: Connection[];
   bridges: Bridge[];
   recentActivity: Array<{
