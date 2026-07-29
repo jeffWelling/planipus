@@ -21,6 +21,7 @@ Repository root: `planipus/`
 | [DATA-MODEL.md](DATA-MODEL.md) | Aggregate, table, lifecycle, and migration specification |
 | [API.md](API.md) | Server-edition HTTP, webhook, CLI, and MCP contract; not used by Mac |
 | [NOTIFICATIONS.md](NOTIFICATIONS.md) | Planned email/webhook delivery of sync notices |
+| [MIGRATION.md](MIGRATION.md) | Planned Mac ↔ Server migration via a credential-free bridge passport |
 | [SOLVER.md](SOLVER.md) | Constraints, scoring, determinism, explanations, benchmarks |
 | [INTEGRATIONS.md](INTEGRATIONS.md) | Provider contracts and delivery sequence |
 | [SECURITY.md](SECURITY.md) | Threat model and safe deployment defaults |
