@@ -28,7 +28,7 @@ while `bridge.reconcile` got an MCP tool no UI calls, or that the MCP Zod schema
 would be stricter than the routes they wrap. That is simply what a fourth
 hand-written catalogue buys.
 
-`conformance/surface/v1/operations.json` declares every operation once: `id`,
+`registry/v1/operations.json` declares every operation once: `id`,
 `noun`, `verb`, HTTP method/path, `auth_preset` (one of the four literal preset
 names at `app.ts:287-299`), `scope`, `mutating`, danger class, capability gate,
 `effects[]`, output schema id, exit codes, `status` (`shipped|planned`), and a
@@ -521,9 +521,12 @@ added to `REQUIREMENTS.md` and `TRACEABILITY.md` together.
 4. **Confirm-digest scope** — the four effect counts, or widen it to cover
    `excluded_by_reason` and the disclosure list so an agent must have read the
    privacy consequences too? Wider is safer and more tedious to produce by hand.
-5. **Registry location** — `conformance/surface/v1/` beside the behaviour
-   fixtures, or `registry/v1/` at the root to keep `conformance/` meaning
-   cross-edition behaviour only?
+5. ~~**Registry location**~~ — **decided 2026-07-30: `registry/v1/` at the repo
+   root.** `conformance/` keeps meaning exactly one thing: the cross-edition
+   behaviour corpus both evaluators execute against a canonical SHA-256 vector.
+   The surface registry is a build-time contract nothing executes as fixtures,
+   and it spans two editions where the conformance corpus spans one behaviour
+   contract. `PARITY.lock` sits beside it.
 6. **Phase ordering** — 4 before 3? Phase 4 makes the CLI installable without a
    browser but does not increase coverage; Phase 3 unlocks two entire product
    screens but leaves credential setup a browser act.

@@ -12,7 +12,7 @@ Supersedes in part: ADR-004 (§Consequences sentence "There is no incoming liste
 
 ## Context
 
-`SURFACES.md` §8 records an owner decision of 2026-07-30: each edition owns a complete triad — API, CLI and MCP — with the Mac's off by default and authentication required. It defers mechanism, threat model and enablement to this record. `SURFACES.md` also already decides the *dialect*: one operation registry at `conformance/surface/v1/operations.json`, one agent envelope (`schema, op, ok, outcome, data|error, warnings, next, meta`), a 41-entry safe error-code allowlist shared with the MCP adapter, fourteen frozen exit codes, and a `PARITY_DEBT` gate that must equal zero. Nothing in this decision re-opens any of that.
+`SURFACES.md` §8 records an owner decision of 2026-07-30: each edition owns a complete triad — API, CLI and MCP — with the Mac's off by default and authentication required. It defers mechanism, threat model and enablement to this record. `SURFACES.md` also already decides the *dialect*: one operation registry at `registry/v1/operations.json` (relocated from the drafted `conformance/surface/v1/` by owner decision of 2026-07-30, so that `conformance/` keeps meaning only the cross-edition behaviour corpus), one agent envelope (`schema, op, ok, outcome, data|error, warnings, next, meta`), a 41-entry safe error-code allowlist shared with the MCP adapter, fourteen frozen exit codes, and a `PARITY_DEBT` gate that must equal zero. Nothing in this decision re-opens any of that.
 
 Four facts about the present tree bound the design.
 

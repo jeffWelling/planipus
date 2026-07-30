@@ -1,5 +1,256 @@
 # Decisions
 
+## 2026-07-30 — Corrections to the planning round after independent security review
+
+An independent reviewer re-derived the platform claims by probe and the repo
+claims by reading code. Several assertions made during the planning round are
+wrong and are corrected here. `PLAN-NEXT-2026-07-30.md` is immutable; this entry
+governs where the two disagree.
+
+**`PLAN-NEXT` §1 defect D3 is FALSE and must not be worked.** The claim was that
+Protect and Meet accept an activation and write nothing while the experimental
+planning gate is off. The gate is correctly wired end to end.
+`server/src/commands/api.ts:14` omits `planning` from the dependency object
+entirely when `planningProviderWritesEnabled` is false; all ten planning routes
+guard on `dependencies.planning` and return `503 planning_unavailable`
+(`app.ts:527,532,545,549,555,561,566,572,576,582`); `/api/v1/capabilities`
+reports `availability_protection: "unavailable"` (`app.ts:512-513`); and
+`App.tsx:211-212,749-750` removes Protect and Meetings from the navigation
+entirely. The user is never shown the feature, cannot activate it, and is never
+given a block count. The scenario is unreachable, and has been since the base
+commit. The persona synthesis ranked this defect first and seven of nine personas
+named it a deal-breaker; that ranking was built on a false premise. **TH-01 is
+withdrawn from the current phase.** What survives is smaller and genuinely worth
+doing: activation and reconciliation responses should still report provider
+effects rather than local intent, and bridges and rules should still expose a
+last-successful-provider-write timestamp.
+
+**Defect D4's privacy framing was backwards.** `web/src/api.ts:433-442` hard-codes
+**eight** selection fields, not six — the six enums plus `source_exclusion_marker`
+and `manual_exclusions` — against a server validator that accepts 324
+combinations. That asymmetry is real. But `all_day: 'skip'` is not a leak:
+skipping writes no block, which is strictly *less* information flow, and an
+absent block is the calendar's default state carrying no signal. The actual harm
+runs the other way — an all-day source event (surgery, a court date, a full-day
+clinic) receives no protection at all, so a colleague books over it while the
+user believes they are covered. It is an availability-correctness defect.
+`all_day: 'busy_only'` is the safer default and the fix is unchanged; the
+reasoning in the plan is not.
+
+**Defects D1, D2, D5 are confirmed**, with two corrections. There is no literal
+"never copied" string in `web/src`; that phrasing originates in `PERSONAS.md`.
+The shipped UI text is literally true about the destination write. The conflation
+is structural rather than a mislabelled string: `evaluate.ts:221-230` emits an
+honest `source_fields_read` that always includes `/content/summary`, and
+`web/src/api.ts:88-97` does not carry that field in its type at all, so the one
+honest signal is dropped before it reaches the screen. Separately, D1 is worse
+than stated: `providers/google/calendar.ts:162-164` sets `singleEvents=true`, so
+recurrence is expanded into discrete instances rather than copied as an RRULE,
+which leaks *more* legibly — N blocks at exact instants, plus every exception and
+reschedule.
+
+**ADR-006's stated reason for hand-rolling BSD sockets is wrong, and the real
+reason is more dangerous.** `NWEndpoint.unix(path:)` does exist
+(`Network.swiftinterface:392`) and `NWConnection` to it works. The trap is that
+`NWListener` has no endpoint-taking initializer and **silently ignores**
+`parameters.requiredLocalEndpoint = .unix(path:)`: a probe reached `.ready` with
+no socket inode created and a TCP port assigned. A developer taking the obvious
+Network.framework route gets a TCP listener while believing they have a Unix
+socket — in a sandboxed app that then requires `com.apple.security.network.server`
+and is browser-reachable, which is precisely the outcome the ADR exists to
+prevent. The secondary and decisive reason is that Network.framework hides the
+file descriptor, so `LOCAL_PEERTOKEN` is unavailable and the peer-verification
+design is impossible on it.
+
+**The socket mode must be established before `bind()`, not after.** `bind()`
+creates the inode as `0777 & ~umask`, measured as 0755 under a default umask, and
+Darwin does enforce socket mode bits on `connect()`. The window between `bind()`
+and `chmod()` is genuinely open. Call `umask(0177)` before `bind()` and place the
+socket in a 0700 parent directory. `SURFACES.md`'s Server operator socket, as
+originally specified with mode 0600 and no parent-directory requirement, was racy.
+
+**`LOCAL_PEERTOKEN` must validate `optlen`, not just the return code.** On an
+AF_INET socket the call does not fail: `SOL_LOCAL` is 0, which on an IP socket is
+`IPPROTO_IP`, and `LOCAL_PEERTOKEN` (6) collides with `IP_RECVRETOPTS`. It
+returns `rc=0, optlen=4` with the first word zeroed, and
+`audit_token_to_euid()` on that reads as **root**. Any peer-verification helper
+must assert `optlen == sizeof(audit_token_t)`. Citation corrections:
+`audit_token_t` is defined in `mach/message.h:506-508`, not `bsm/audit.h`;
+`audit_token_to_pidversion` is public SDK API at `bsm/libbsm.h:1576`, requiring
+`-lbsm`. Related: an ad-hoc binary carrying `keychain-access-groups` does not
+merely fail the Keychain call — AMFI SIGKILLs it at exec. And the Keychain *read*
+path returns `-25300 errSecItemNotFound`, not `-34018`, so code special-casing
+only `-34018` will misdiagnose a missing entitlement as "no credential stored"
+and silently re-prompt for OAuth.
+
+**`observation_hash` is unkeyed and must not be exposed.** It is a plain SHA-256
+over the full normalized event (`policy/runtime.ts:20-22`), so it is a stable
+per-event correlator and a confirmation oracle: the destination already discloses
+exact start and end, so an adversary with a candidate title list confirms a guess
+by recomputation. ADR-006's content-free projection proposed carrying it. It must
+be HMAC'd under a key that never leaves the server, exactly as
+`conflict-response/privacy-hash.ts:16-25` already does and as migration
+`0011:19-20` already explains. Two threat models were being applied to the same
+class of data, and the weaker one sat on the more sensitive input.
+
+**The Mac already contains the B10 attack as a latent code path.**
+`AppModel.persistConfigurationAndReschedule` regenerates `SyncPolicy` from
+presentation state via `syncPolicy(for:)` (`AppModel.swift:646`, `:922-934`),
+passing only ids, `enabled`, a hardcoded profile and `privacyPreset` — so
+`manualExcludedSourceEventIDs` reverts to `[]` and `genericLabel` to its default
+on every configuration save. It is latent only because no UI writes those fields
+yet. **Any manual-exclusion UI ships broken unless this is fixed first.**
+Relatedly, `persistConfigurationAndReschedule` calls `stopPolling()`/
+`startPolling()` and the poll loop runs `runOnce` before its first sleep, so a
+configuration change kicks a full fetch-reconcile-drain immediately. The gate
+placed on a config-mutating call is bypassed at once, not eventually — which
+strengthens rather than weakens the decision to enforce at the effect.
+
+**On the Server, `generic_summary` is not constrained to "Busy".** The `"Busy"`
+hard-override exists only in the Mac evaluator (`PolicyEvaluator.swift:63`).
+`packages/calendar-sync/src/evaluate.ts:196-198` uses `generic_summary` verbatim
+under `busy_only`, the API validator checks only non-empty
+(`app.ts:1341-1342`), and MCP accepts 160 characters alongside
+`preset: "busy_only"` (`mcp/src/schemas.ts:57`). An MCP client — including a model
+under injection — can therefore create a `busy_only` policy whose
+employer-calendar title is arbitrary text, including the real appointment title.
+This is a live disclosure path and outranks most of the planned work.
+
+**`POST /api/v1/sync` deliberately defeats job dedupe** for planning and
+conflict-response by suffixing the dedupe key with `manual-sync:${Date.now()}`
+(`app.ts:852,869`) while sync and policy reconcile use stable keys. Retrying a
+timed-out `/sync` therefore enqueues duplicate conflict-response reconciliations —
+the exact duplicate-cancellation hazard that motivated CLI exit code 11, present
+today and reachable without a CLI. Exit 11 is a convention that only helps a
+client that obeys it; **idempotency keys make retries safe regardless of client
+discipline, and both should ship.**
+
+**Further defects recorded for triage**, each verified: eighteen routes have no
+rate limiting because `enforceActorRateLimit` is invoked only from
+`requireActor`, and that set includes `POST /api/v1/sync`, which fans out to
+Google; `trustProxy: false` (`app.ts:104`) behind the Helm ingress collapses every
+client to the ingress pod IP, so five bad bootstrap attempts lock every user out
+for fifteen minutes; `source_exclusion_marker` accepts the empty string in both
+editions, silently disabling `#nosync` entirely, while the non-empty guard this
+codebase already applies to `generic_summary` is absent;
+`preview_conflict_response_rule` is annotated `destructiveHint: false` and
+registered unconditionally outside the apply branch, yet returns real
+`{start_at, end_at}` pairs for conflicted invitations and fans free/busy queries
+across up to 32 calendars — so a "read-only" MCP deployment still pushes private
+busy times into model context; and `source_observations` is never purged by the
+cleanup sweep, with deletion tombstoning the row while preserving the content
+block.
+
+**Counts to correct before they are encoded in a test.** `SESSION_ONLY_WEB_OPS`
+is **16**, not 15 (ten planning routes, plus sync, authorize, metrics and three
+api-token routes). ADR-006's "twelve planning routes" is **ten**. The headline
+surface figures are exact and confirmed: 46 route registrations plus a not-found
+handler; 20 bearer-reachable; 18 owner-session-only; 6 unauthenticated API routes.
+
+**Two mechanism descriptions were inverted and are corrected.**
+`protectedMutation` (`app.ts:296-299`) does not use `mutationOriginAndCsrf`; it
+composes `requireOrigin` and `app.csrfProtection` with a `requireSession`
+preHandler. `mutationOriginAndCsrf` (`:279-286`) serves `protectedProposal` and
+`protectedApply`, and its early return on a present `Authorization` header is
+what correctly lets a non-ambient bearer credential skip Origin and CSRF. The
+conclusion — no bearer token can reach a `protectedMutation` route — stands and is
+covered by `api.test.ts:164-170`. Separately, App Sandbox requires only
+`com.apple.security.app-sandbox` for a container Unix socket;
+`network.client` is irrelevant to AF_UNIX and gates AF_INET only. And the YAML
+argument should rest on the two unconditional premises — an unquoted `#nosync`
+is a comment producing null in every parser, and a truncated YAML mapping is a
+valid document missing its last keys where truncated JSON throws. Sexagesimal
+`HH:MM` coercion and the Norway problem are YAML 1.1 behaviours, present in Psych,
+`yaml.v2` and PyYAML's default loader but not in js-yaml 4 or `yaml.v3`. Stating
+them unconditionally invites a reviewer to refute a premise and dismiss a correct
+conclusion.
+
+**Verified clean, so they are not re-litigated:** the OAuth flow (single-use state
+under `FOR UPDATE`, envelope-encrypted PKCE verifier with transaction-bound AAD,
+`id_token` verified against the required client id, `email_verified` required,
+role taken from the pre-redirect intent, role downgrade purging event-read data
+with an audit row); static asset serving; log redaction; content-free
+`audit_facts.detail`; provider errors never interpolating response bodies; no API
+route emitting event content; and `evaluate.ts:133-137` hard-rejecting
+`copy_attendees`/`copy_organizer` for every preset and failing closed on a
+mislabelled one — identified as the strongest control in the codebase.
+
+## 2026-07-30 — Owner rulings on OAuth identity, distribution, retirement, retention, presence and multi-principal scope
+
+Six product decisions taken after the persona and surface planning round. Each
+resolves an open question in `PLAN-NEXT-2026-07-30.md` §8.
+
+**Google OAuth client identity: ship both, and name which is in use.** BYO-client
+remains the default and documented path; a verified Planipus client exists for
+accounts inside a Workspace that enforces a Marketplace allowlist, where an
+unrecognised client fails `admin_policy_enforced` before any feature matters. The
+connection detail must always state which client authorised it, so a self-hoster
+can demonstrate that no vendor is in the path. The named publisher entity for the
+CASA assessment is **not** decided by this entry and must not be assumed from any
+sibling project; Planipus is Apache-2.0 and its publisher identity is a separate
+question with legal consequences.
+
+**First image: publish an explicitly unreviewed pre-release.** A multi-arch image
+plus a compose file ship before the SBOM, provenance, signing and advisory gates
+close, labelled supply-chain-unreviewed in the tag, the README and a persistent
+web-UI banner. The alternative leaves the adopters most able to generate live
+evidence with nothing to install, which delays the S1 gates that no amount of
+coding closes. The label is not decoration: it must be impossible to deploy this
+image and believe it was reviewed.
+
+**Bridge retirement forces an explicit choice with no default.** Retirement
+presents detach-and-leave and delete-all with exact counts, neither preselected,
+detach listed first, and the count in the button. A default is a decision made on
+behalf of someone who is panicking, and the two outcomes are irreversible in
+opposite directions. The confirmation must state that deletion removes events
+from the calendar and cannot reach the admin audit log, a Vault export, backups
+or device caches.
+
+**The undo ships read-before-write.** Marker-verified enumeration of managed
+copies, plus pause semantics that disclose surviving copies separately instead of
+collapsing them into "0 new copies", ship in the current phase at zero risk. The
+destructive half ships only after the live-Google gates have exercised marker
+verification, because bulk destination deletion against unproven marker
+verification, reached in a panic, is the worst combination in the product.
+
+**Retention defaults to timing-only for redacted presets.** When every active
+policy on a source endpoint is `busy_only` or `commitment`, only timing,
+availability, lifecycle, origin, recurrence identity, an exclusion boolean and
+the observation hash are persisted. A deployment-wide flag lets an operator
+enforce it organisation-wide. The cost is accepted: Planipus can no longer show a
+user what an event was, and upgrading such an endpoint to a detail preset
+requires a full re-sync. This is what converts "the operator cannot read your
+event titles" from a promise into a property.
+
+**`presence:widened` is omitted from v1.** It is technically safe — deterministic,
+verifier-stable, and enforceable as strictly-widening — but every user who asked
+for coarsening wanted cadence concealment, which widening does not provide. A
+tier whose principal effect is to be misunderstood by the people who select it
+costs more than it returns. Presence ships as `mirrored`, `absorbed` and
+`suppressed`.
+
+**The surface registry lives at `registry/v1/`, not under `conformance/`.**
+`conformance/` keeps meaning exactly one thing: the cross-edition behaviour
+corpus that both the TypeScript and Swift evaluators execute against a canonical
+SHA-256 vector. The surface registry is a build-time contract nothing executes as
+fixtures, and it spans two editions where the behaviour corpus spans one
+contract. `PARITY.lock` sits beside it. `SURFACES.md` is updated in place;
+`PLAN-NEXT-2026-07-30.md` §8 item 9 remains as written, because plan files are
+immutable and drift is recorded here.
+
+**Multi-principal support is restricted, not general.** OIDC and real per-member
+principals are permitted only in deployments where every policy is `busy_only`
+and every connection is availability-only — the configurations in which
+timing-only retention makes the operator's inability to read member content
+structurally true. `private_details` and `shared_details` are refused in a
+multi-principal deployment. The general role model is rejected because its
+central promise is one this architecture cannot keep: reconciliation needs the
+normalised event, so a worker must be able to decrypt it, and anyone who can
+restore a backup can read it regardless of what the UI enforces. Multi-principal
+work begins only after the undo and retention decisions above have landed, and
+its threat model must name employer-demanded and partner-demanded access as
+in-scope adversaries.
+
 ## 2026-07-30 — Symmetric per-edition triads, one operation registry, and a container-socket Mac control plane
 
 Each edition owns a complete triad: Planipus Server has a Server API, CLI and
