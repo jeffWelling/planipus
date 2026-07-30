@@ -1,7 +1,9 @@
 # Planipus Server API, CLI, webhook, and MCP contract
 
 Status: implementation contract for Calendar Sync plus the bounded alpha
-availability-protection/Smart Meeting slice introduced by migration `0004`.
+availability-protection/Smart Meeting slice introduced by migration `0004`,
+scoped API tokens/stdio MCP, and Server-only no-copy conflict response introduced
+by migrations `0006` through `0014`.
 The complete planner, task, booking, analytics, and assistant APIs still require
 later requirements/ADR evidence and are not part of this version. This is
 exclusively the Kubernetes Server edition contract.
@@ -25,7 +27,9 @@ available.
 | Google connections | `GET /api/v1/connections`, `POST /api/v1/connections/google/authorize`, `GET /api/v1/connections/google/callback` |
 | Calendars/overview | `GET /api/v1/calendars`, `GET /api/v1/overview` |
 | Capabilities | `GET /api/v1/capabilities` |
+| Machine authentication | `GET /api/v1/auth/context`; browser-only `GET`/`POST /api/v1/api-tokens`, `DELETE /api/v1/api-tokens/{id}` |
 | Directed policies | `GET /api/v1/policies`, `POST /api/v1/policies/preview`, `POST /api/v1/policies`, `POST /api/v1/policies/{id}/pause`, `/resume`, `/recover`, `/reconcile` |
+| No-copy conflict response | `POST /api/v1/conflict-response/preview`, `GET`/`POST`/`DELETE /api/v1/conflict-response/rules[/{id}]`, `POST /api/v1/conflict-response/rules/{id}/pause`, `/resume`, `/reconcile` |
 | Alpha planning | `POST /api/v1/planning/preview`, `POST`/`GET /api/v1/planning/rules`, `POST /api/v1/planning/rules/{id}/pause`, `/resume`, `/replan`, `DELETE /api/v1/planning/rules/{id}`, `GET /api/v1/planning/suggestions`, `POST /api/v1/planning/suggestions/{id}/accept`, `/dismiss` |
 | Manual work | `POST /api/v1/sync` |
 | Operations | `GET /api/health/live`, `/startup`, `/ready`; authenticated `GET /api/v1/health/detail` and `GET /api/metrics`; `GET /api/openapi.json` |
@@ -33,8 +37,9 @@ available.
 The current policy draft embeds a new hours profile in `hours_profile`; activation
 persists that profile and replaces it with `hours_profile_id` atomically. Saved
 hours-profile CRUD, policy edits/deletion/detach/cleanup, connection disconnect,
-projection inspection, provider webhooks, API tokens, CLI, outbound webhooks and
-MCP are not implemented yet. The React app uses only the implemented subset.
+projection inspection, provider webhooks, CLI, outbound webhooks, and remote
+Streamable HTTP MCP are not implemented yet. The React app and stdio MCP adapter
+use only the implemented subset.
 `POST /api/v1/policies/{id}/recover` is an explicit bounded retry for held or
 failed projections and their dead effects, including verifier-only ownership
 holds. It enables provider read-before-write, preserves effect ordering, and
@@ -43,7 +48,9 @@ hash, tombstone state, policy revision, or desired payload changed retires the
 old effect locally and schedules current-source reconciliation instead of
 calling the provider.
 
-Current mutations use same-origin browser session + CSRF protection. The target
+Browser mutations use same-origin session + CSRF protection. Selected policy and
+conflict-response routes additionally accept dedicated bearer tokens and enforce
+`propose` versus `apply`. The target
 idempotency-key and ETag conventions below still apply to the larger public API
 but are not yet uniformly exposed by this private setup slice.
 
@@ -82,6 +89,41 @@ scoped, expiring, random, stored hashed, and shown once. Initial single-user mod
 still enforces authorization boundaries so future multi-user operation cannot
 accidentally expose credentials or source details.
 
+API-token scopes are `read`, `propose`, and `apply`; `propose` implies `read`,
+and `apply` implies both. Expiry is required (default 30 days, maximum 365).
+Only an active owner using a browser session may create, list, or revoke tokens.
+The plaintext `pln_api_…` credential is returned only by the creation response;
+later lists return metadata. Bearer requests use `Authorization: Bearer` and do
+not use browser CSRF. Supplying both a session cookie and bearer header is an
+`ambiguous_credentials` error.
+
+Authenticated route classes have current single-process fixed-window limits,
+keyed by organization, actor kind, and session/token identity: `read`
+600/minute, `apply` 120/minute, and `propose` 30/10 minutes. HTTP 429
+`api_rate_limited` includes numeric `Retry-After`. The counters are in memory,
+reset on restart, and are not shared between replicas. Conflict preview also
+checks PostgreSQL for at most 10 existing unconsumed/unexpired previews per
+principal; a preflight at the limit returns 429 `preview_rate_limited` with
+`Retry-After: 60`, but a hard concurrent-create database quota is still open.
+These are alpha blast-radius guards, not a distributed/public/planning abuse-
+control system.
+
+Bearer `read` is accepted on auth context, connections, calendars, overview,
+capabilities, policies, detailed health, and conflict-response-rule reads.
+Bearer `propose` is accepted on bridge/conflict previews. Bearer `apply` is
+accepted on bridge/conflict activation, pause, resume, reconcile, and conflict-
+rule retirement. OAuth,
+session, token administration, metrics, planning-alpha administration, and
+installation-wide manual sync remain browser-session only.
+
+### Machine token routes
+
+- `GET /api/v1/auth/context`
+- `GET /api/v1/api-tokens` — browser-session owner; metadata only
+- `POST /api/v1/api-tokens` — browser-session owner, body
+  `{label, scopes, expires_in_days}`; returns plaintext once
+- `DELETE /api/v1/api-tokens/{id}` — browser-session owner; revoke
+
 OAuth callbacks consume server-held, single-use, principal/organization-scoped
 state and PKCE. The current callback is not bound to the initiating browser
 session; adding that binding requires a separately designed callback cookie
@@ -117,6 +159,35 @@ response may expose provider, masked identity, scopes, capability flags, last
 success, lag, and action-required reason; it omits token material and raw OAuth
 responses.
 
+Every Google callback serializes one organization + verified Google subject
+before selecting or upserting the provider-connection row. This includes the
+first connection, not only reauthorization, so two callbacks cannot create
+competing identities or make different event-read purge decisions.
+
+An `availability` callback additionally rejects
+`oauth_scope_overbroad` when Google's returned grant still contains any broader
+Calendar scope. Google can retain scopes from an earlier source/both consent;
+Planipus does not treat a narrower request as proof that access was narrowed.
+If Google omits the returned scope set entirely, availability fails
+`oauth_scope_unverified`; unlike other roles, it never substitutes the requested
+scopes as proof of a private grant.
+The user must revoke Planipus's prior Google grant at Google and start a new
+availability-only connection. The failed callback does not change the existing
+Planipus role or claim that stored event content was purged.
+
+Reauthorizing an existing Google `source`/`both` connection to a role without
+event reads is a guarded data transition. The safe error
+`availability_role_change_blocked` means a non-deleted bridge/planning/response
+rule or a historical projection/invitation-action still references its event
+content. Pause is not removal. Retire supported planning/response rules and
+retry. A bridge dependency or historical reference cannot be cleared through a
+supported alpha purge/bridge-retirement route, so keep the broader role or
+connect a distinct dedicated availability-only account. On success Planipus
+atomically purges observations/cursors,
+retires subscriptions/pending sync work, restricts endpoints, and audits counts.
+Clients must not suggest direct SQL or report the narrower role before callback
+commit.
+
 Disconnect preview reports affected policies and projections and offers explicit
 choices: stop only, remove managed destination copies, or leave copies detached.
 The command never deletes source events.
@@ -128,9 +199,13 @@ The command never deletes source events.
 - `PATCH /api/v1/calendars/{id}` — local label/color/ignore metadata only
 
 Responses identify the owning connection, provider calendar ID through an opaque
-local reference, provider timezone, primary/readable/writable flags, and health.
-Privacy and filtering do not live on a source calendar: they belong to each
-directed sync policy.
+local reference, provider timezone, primary/readable/writable flags, capabilities,
+and health. `readable` strictly means event-content access; an
+availability-only endpoint intentionally reports `readable: false` and
+`capabilities.freebusy_readable: true`. API and MCP clients must use the latter
+for private free/busy selection and must never infer permission to list event
+content from it. Privacy and filtering do not live on a source calendar: they
+belong to each directed sync policy.
 
 ## Hours profiles
 
@@ -222,12 +297,17 @@ Representative personal-to-work draft:
 ```
 
 The server expands presets into an explicit, versioned transformation and
-returns both. It rejects the same source and destination, unwritable targets,
-credential/account mismatches, unsafe attendee/invitation behavior, recursive
-policy graphs, invalid hours, and unbounded horizons.
+returns both. It rejects the same underlying source and destination with
+`same_provider_calendar`, including two delegated Google endpoints for one
+globally identified calendar; it also rejects unwritable targets, credential/
+account mismatches, unsafe attendee/invitation behavior, recursive policy
+graphs, invalid hours, and unbounded horizons.
 
-Create requires the unexpired preview token. Activation writes the policy and
-durable reconciliation intent atomically; provider effects happen asynchronously.
+Create requires the unexpired preview token. Activation re-loads both endpoint
+capabilities, locks local and canonical provider-calendar identities, rejects a
+changed identity, and persists the canonical source/destination identities with
+the policy. It writes the policy and durable reconciliation intent atomically;
+provider effects happen asynchronously.
 After activation, ordinary source create/update/delete events reconcile without
 manual preview.
 
@@ -279,6 +359,134 @@ States are `pending_create`, `active`, `pending_update`, `pending_delete`,
 idempotent. Deleting a managed copy externally normally queues recreation;
 removing the source or excluding it queues deletion. These semantics are defined
 fully in `CALENDAR-SYNC.md`.
+
+## No-copy conflict-response rules
+
+These Server-only routes are implemented:
+
+- `POST /api/v1/conflict-response/preview` — browser or bearer `propose`;
+- `POST /api/v1/conflict-response/rules` — consume `{preview_token}` with
+  browser authorization or bearer `apply`;
+- `GET /api/v1/conflict-response/rules` — browser or bearer `read`;
+- `POST /api/v1/conflict-response/rules/{id}/pause` — browser or bearer `apply`;
+- `POST /api/v1/conflict-response/rules/{id}/resume` — browser or bearer `apply`;
+- `POST /api/v1/conflict-response/rules/{id}/reconcile` — browser or bearer
+  `apply`, returns an asynchronous job result.
+- `DELETE /api/v1/conflict-response/rules/{id}` — browser or bearer `apply`;
+  idempotently retire and supersede pending/held actions.
+
+Canonical preview input:
+
+```json
+{
+  "name": "Protect work from personal conflicts",
+  "response_calendar_id": "work-calendar-endpoint",
+  "availability_calendar_ids": ["personal-calendar-endpoint"],
+  "decline_message": "I have a private conflict at that time. Please choose another time.",
+  "horizon_days": 60
+}
+```
+
+Unknown fields are rejected. One through 32 unique availability calendars and
+a distinct underlying response calendar are required. Local endpoint IDs are
+not sufficient for that check: Google calendar IDs are canonical globally, so
+the same calendar selected through delegated connections is one provider
+calendar. Duplicate availability aliases and response/availability aliases fail
+`same_provider_calendar`. The work response calendar must be readable/writable
+with connection role `both`, and only one non-deleted rule may control the
+underlying provider calendar. That durable identity also supplies one historical
+safety budget across aliases. `decline_message` is static and never interpolates
+event data. Availability supports roles
+`availability`, `source`, and `both`; `availability` is the recommended
+strict-private grant because `calendar.freebusy` does not authorize Google
+`Events.list`, and Planipus role guards prevent event ingestion and bridge-
+source use. Its endpoint has `readable: false` and
+`capabilities.freebusy_readable: true`; source/both endpoints can have both
+flags true. A dedicated availability-only calendar with no bridge history is
+safest. Every selected availability calendar is protected from any active
+bridge. Conflict preview/activation/apply report `copy_policy_conflict` for an
+active outbound bridge and `availability_copy_feedback` for any active/paused
+inbound bridge. Bridge preview/activation/resume reports
+`no_copy_rule_conflict` when either endpoint is protected. Mutation paths share
+a transaction advisory lock for local endpoints **and** canonical provider-
+calendar identities, locking every selected availability calendar or both
+bridge endpoints. Thus a bridge through a second Google alias cannot bypass the
+no-copy rule, and an alias race cannot commit both configurations.
+
+An existing bridge source can transition by calling its pause route before
+conflict preview/activation. Already-created managed destination copies remain;
+the no-copy activation does not delete or detach them. The bridge cannot resume
+while the protection rule remains non-deleted, including while it is paused.
+The implemented alpha has no cleanup route for older copies, so API clients must
+display that impact and must not imply whole-installation zero-copy. Retiring
+the protection rule through its DELETE route permits bridge resume,
+but does not clean those older copies or reverse applied declines. A calendar
+with any inbound bridge cannot transition through pause alone because its
+surviving copies can feed back as private busy time.
+
+Preview returns an expiring one-use token, `invitation_count`,
+`conflict_count`, `held_count`, up to three `{start_at,end_at}` examples, and
+warnings. It also returns `provider_writes_enabled` and `message_delivery`
+(`simulated|unverified_google`); rule-list rows repeat them. The capabilities
+document exposes `conflict_auto_decline_provider_writes` and
+`conflict_decline_message_delivery`. Preview contains no title or personal event
+identity/content. Disabled writes add warning `invitation_writes_disabled`;
+Google adds `decline_message_delivery_unverified` regardless of write opt-in.
+Paused outbound copies add `paused_bridge_existing_copies_remain`; source/both
+roles add `availability_role_may_retain_event_content`; and a large preview may
+add `automatic_decline_budget_will_hold_excess`.
+Activation recomputes the exact provider-derived input at the
+preview reference time and returns HTTP 409 `preview_stale` if invitations,
+revisions, capabilities, or availability changed.
+
+Only future, confirmed, timed, provider-original work events no longer than
+seven days, fully within the horizon, and for which the connected identity is a
+self attendee still at `needs_action` are candidates. Work sync must be ready
+and successful within 15 minutes; each successful work response-calendar sync
+immediately enqueues conflict-rule reconciliation, with the 15-minute scheduler
+as a safety fallback. The indexed candidate query fails closed over 5,000
+observations. At most 20 automatic declines per underlying response-provider
+identity may be applied or reserved in a rolling 24-hour window. Immutable
+`invitation_response.declined` audit facts supply the applied count; historical
+rules, delegated Google aliases, reschedules, and reused action rows therefore
+share the budget even if mutable action status changes. Excess actions are held
+with `automatic_decline_budget_exceeded`.
+Cancelled, all-day, started, organizer-owned, accepted, or tentative events are
+not overridden. Apply revalidates the current work
+observation/revision, refreshes free/busy for the exact interval, GETs the exact
+provider invitation, and conditionally responds. Pause/remove never accepts or
+undoes a prior decline.
+
+For a durable pending Planipus action, an initial exact provider GET that already
+shows the self attendee as `declined` is conservative crash recovery: Planipus
+marks the action `applied` with `changed=false` and sends no PATCH. Exact comment
+equality sets `comment_retained=true`; an absent/different comment reports
+`decline_comment_not_retained`. The result appends the normal immutable decline
+fact and consumes the 20/24-hour budget. This may conservatively attribute a
+manual decline to Planipus, but it never overwrites a user answer and cannot
+increase the automatic-write budget. Accepted and tentative remain held/fail
+closed.
+
+The same applied/warning behavior is used when a post-write verification proves
+the self RSVP is declined but the configured attendee comment was not retained.
+Planipus does not retry or overwrite a confirmed decline merely to chase comment
+persistence. Google write-side 5xx responses and response-read failures are
+ambiguous, so they trigger the same exact GET verification before Planipus
+decides the durable outcome.
+
+Live Google applies use a self-attendee-only conditional PATCH with configured
+comment, `attendeesOmitted=true`, `If-Match`, and `sendUpdates=none`, but remain
+disabled by default behind
+`PLANIPUS_EXPERIMENTAL_GOOGLE_INVITATION_DECLINE=false`. Organizer comment
+visibility and actual mail/notification behavior remain live-provider release
+gates: Google documents `responseStatus` propagation, not guaranteed comment
+delivery, and Planipus deliberately avoids broad `sendUpdates=all` guest
+updates. With the Google gate off, activation fails
+HTTP 409 `invitation_writes_disabled`; conflict-rule resume fails the same way.
+Fake mode reports simulated writes. Enabling the RSVP write gate does not change
+`message_delivery` from `unverified_google`; a provider-verified decline with a
+dropped comment additionally reports `decline_comment_not_retained`.
+See `CONFLICT-RESPONSE-AND-MCP.md` for the complete contract.
 
 ## Alpha planning rules
 
@@ -580,16 +788,43 @@ exact counts/targets and require confirmation; noninteractive use requires
 
 ## MCP
 
-P0 tools are read/propose oriented:
+The implemented `@planipus/mcp` process uses the official MCP TypeScript SDK
+1.29.0 and stdio transport. It is an API-only adapter: every resource/tool calls
+the authoritative Planipus HTTP API over HTTPS, or loopback HTTP for local
+development. It has no database/provider/OAuth imports. Remote Streamable HTTP
+transport is not implemented.
 
-- `list_connections`, `list_calendars`, `get_sync_health`;
-- `list_policies`, `get_policy`, `list_projection_errors`;
-- `preview_sync_policy`, `preview_policy_change`;
-- `pause_policy`, `resume_policy`, and `reconcile_policy` only when apply
-  capability is explicitly configured.
+Read tools: `list_connections`, `list_calendars`, `get_sync_health`,
+`list_policies`, `get_policy`, and `list_conflict_response_rules`.
 
-MCP never returns OAuth credentials or source event detail suppressed by policy.
-Provider event text is data and cannot alter tool capabilities.
+Proposal tools: `preview_sync_policy` and
+`preview_conflict_response_rule`.
+The latter is annotated MCP `openWorldHint=true`, `readOnlyHint=false`, and
+`destructiveHint=false`: it calls external provider free/busy and persists an
+expiring preview but does not activate a rule or change an RSVP.
+
+Apply tools: `activate_sync_policy`, `pause_policy`, `resume_policy`,
+`reconcile_policy`, `activate_conflict_response_rule`,
+`pause_conflict_response_rule`, `resume_conflict_response_rule`, and
+`reconcile_conflict_response_rule`, and `retire_conflict_response_rule`.
+
+Apply tools are absent unless `PLANIPUS_MCP_ENABLE_APPLY=true`; the API token
+must independently contain `apply`. The least-sensitive default token contains
+only `read`; add `propose` only when provider-contacting previews and their time-
+overlap inference are required. Static resources are `planipus://capabilities`,
+`planipus://overview`, `planipus://connections`, `planipus://calendars`,
+`planipus://policies`, and `planipus://conflict-response-rules`.
+
+Configuration requires `PLANIPUS_API_URL` and `PLANIPUS_API_TOKEN`. The URL
+must be an origin, with HTTPS except loopback. Requests reject redirects, time
+out after 300 seconds, and cap responses at one MiB. The deadline covers the
+bounded worst-case 32-calendar/four-lane/20-second provider availability query;
+the internal client accepts 1–600 seconds, but stdio does not expose an override.
+A timed-out GET reports `api_timeout`; a timed-out POST/DELETE reports
+`api_timeout_outcome_unknown`, because client abort cannot prove API work was
+canceled. Callers list current state before retrying an unknown-outcome mutation.
+MCP never returns OAuth credentials or private event content. Provider event
+text is untrusted data and cannot alter tool or token capabilities.
 
 ## Rate and size controls
 

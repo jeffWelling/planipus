@@ -41,6 +41,8 @@
       "required": [
         "publicUrl",
         "providerMode",
+        "experimentalGooglePlanning",
+        "experimentalGoogleInvitationDecline",
         "masterKeyId",
         "sessionTtlSeconds",
         "schedulerIntervalMs",
@@ -57,6 +59,8 @@
           "type": "string",
           "enum": ["fake", "google"]
         },
+        "experimentalGooglePlanning": { "type": "boolean" },
+        "experimentalGoogleInvitationDecline": { "type": "boolean" },
         "masterKeyId": { "type": "string", "minLength": 1 },
         "sessionTtlSeconds": {
           "type": "integer",

@@ -48,10 +48,12 @@ export class Scheduler {
         }
         const calendars = await transaction
           .selectFrom("calendar_endpoints")
-          .select("id")
-          .where("organization_id", "=", organization.id)
-          .where("readable", "=", true)
-          .orderBy("id", "asc")
+          .innerJoin("provider_connections", "provider_connections.id", "calendar_endpoints.connection_id")
+          .select("calendar_endpoints.id")
+          .where("calendar_endpoints.organization_id", "=", organization.id)
+          .where("calendar_endpoints.readable", "=", true)
+          .where("provider_connections.intended_role", "in", ["source", "both"])
+          .orderBy("calendar_endpoints.id", "asc")
           .execute();
         for (const calendar of calendars) {
           await this.jobs.enqueue(
@@ -97,6 +99,23 @@ export class Scheduler {
             transaction
           );
         }
+        const conflictResponseRules = await transaction
+          .selectFrom("conflict_response_rules")
+          .select(["id", "revision"])
+          .where("organization_id", "=", organization.id)
+          .where("status", "=", "active")
+          .orderBy("id", "asc")
+          .execute();
+        for (const rule of conflictResponseRules) {
+          await this.jobs.enqueueOnce(
+            organization.id,
+            "reconcile_conflict_response_rule",
+            `conflict-response-rule:${rule.id}:revision:${rule.revision}:window:${reconcileWindow}`,
+            { rule_id: rule.id },
+            now,
+            transaction
+          );
+        }
         await this.jobs.enqueueOnce(
           organization.id,
           "verify_destinations",
@@ -114,6 +133,9 @@ export class Scheduler {
     const retentionCutoff = new Date(now.getTime() - 7 * 86_400_000);
     await this.db.deleteFrom("policy_previews").where("expires_at", "<", retentionCutoff).execute();
     await this.db.deleteFrom("planning_previews").where("expires_at", "<", retentionCutoff).execute();
+    await this.db.deleteFrom("conflict_response_previews")
+      .where("expires_at", "<", retentionCutoff)
+      .execute();
     await this.db
       .updateTable("planning_suggestions")
       .set({ status: "expired", updated_at: now })
@@ -122,6 +144,13 @@ export class Scheduler {
       .execute();
     await this.db
       .deleteFrom("browser_sessions")
+      .where((expression) => expression.or([
+        expression("expires_at", "<", retentionCutoff),
+        expression("revoked_at", "<", retentionCutoff)
+      ]))
+      .execute();
+    await this.db
+      .deleteFrom("api_tokens")
       .where((expression) => expression.or([
         expression("expires_at", "<", retentionCutoff),
         expression("revoked_at", "<", retentionCutoff)

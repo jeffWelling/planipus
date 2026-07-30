@@ -10,7 +10,9 @@ The UI must make five facts obvious:
 3. exactly what the destination can reveal;
 4. whether an Hours rule merely constrains Planipus or publishes Busy time to a
    provider; and
-5. whether a meeting change is only suggested, approved, or automatic.
+5. whether a meeting change is only suggested, approved, or automatic; and
+6. whether private time is represented by a copy/fence or used only for a
+   no-copy invitation response.
 
 `CALENDAR-SYNC.md` controls bridge behavior. `REQUIREMENTS.md` controls active
 protected-time and Smart Meeting acceptance. This document controls
@@ -38,8 +40,9 @@ edition.
 
 Current edition truth must be visible, not buried in release notes:
 
-- **Server alpha:** Bridges, Protect availability fences, and Smart Meetings
-  have implementation foundations and capability flags;
+- **Server alpha:** Bridges, Protect availability fences, Smart Meetings,
+  no-copy conflict response, scoped API tokens, and stdio MCP have implementation
+  foundations and capability flags;
 - **Mac alpha:** only the native bridge flow exists; Protect and Meet are absent;
   and
 - neither edition has passed the live Google/release evidence needed for a
@@ -54,7 +57,7 @@ and never report a calendar event as created from queued local intent alone.
 
 ## Navigation
 
-The current Server alpha has six primary destinations:
+The current Server alpha has seven primary destinations:
 
 - **Overview:** connection health, active bridges, recent decisions, errors;
 - **Calendars:** connected identities and their calendars;
@@ -63,8 +66,10 @@ The current Server alpha has six primary destinations:
   workday;
 - **Meet:** Smart Meeting rules, upcoming materialized occurrences, conflicts,
   and suggestions;
-- **Settings:** Hours explanation, installation, backup, security, and
-  diagnostics.
+- **Private replies:** no-copy rules that can decline an unanswered work
+  invitation when selected private calendars are busy; and
+- **Settings:** Hours explanation, installation, backup, security, diagnostics,
+  and API-token/MCP setup.
 
 Mac retains its native onboarding/sidebar/menu-bar bridge structure until the
 planning features independently satisfy the native P1 acceptance. Do not show
@@ -105,6 +110,19 @@ Account onboarding:
 3. complete OAuth in the provider;
 4. show connected identity, calendars, read/write capability, and token health;
 5. return to an explicit **Connect another account** action.
+
+Role choices explain scope before OAuth:
+
+- **Availability only (recommended for private conflict checks):** calendar list
+  and busy/free intervals; cannot read event titles or details and cannot be a
+  bridge source;
+- **Source:** event read plus free/busy for bridges and availability;
+- **Destination:** event write for copies/planning; and
+- **Both:** event read/write plus free/busy, required for a work account that
+  receives invitations Planipus may respond to.
+
+If an old source/both grant lacks free/busy, show **Reconnect to add private
+availability permission**; never fail as if an event or calendar were invalid.
 
 No destination event is created during account connection.
 
@@ -252,6 +270,152 @@ Before changing a used profile, show all affected bridges and projection counts.
 Exactly-at-boundary examples and current timezone offset are available under
 “How overlap works.”
 
+## Private replies: no-copy conflict response
+
+This screen must not look like another bridge wizard. Its hero says:
+
+> **Keep the details home. Decline the collision.** Private replies do not copy
+> personal events. When a new, unanswered work invitation overlaps private busy
+> time, Planipus can decline it with your message.
+
+A persistent summary shows **0 new copies from private replies** and explains
+that the strict-private availability account contributes busy/free intervals
+only. If setup pauses an existing bridge, show a separate warning that its
+already-created managed copies remain; never collapse that state into zero.
+Guardrails are visible before the composer:
+
+- only unanswered work invitations;
+- only future timed overlaps on explicitly selected calendars;
+- never when the connected identity organizes the meeting;
+- never accepted, tentative, declined, cancelled, started, or changed events;
+- no event/fence created on either calendar; and
+- pause stops future replies but never auto-accepts or undoes one already sent.
+
+The new-rule composer collects:
+
+1. a name;
+2. the work calendar that receives invitations (readable/writable `both` only);
+3. one through 32 private availability calendars, preferring/highlighting
+   `availability` role and a dedicated calendar with no bridge history, while
+   warning when `source|both` has broader event access;
+4. look-ahead horizon (2 weeks, 30, 60, or 90 days in current UI; API accepts
+   1–90); and
+5. static decline comment, maximum 500 characters, with live character count
+   and “same message every time; event details are never inserted.”
+
+If any selected private availability calendar is the source of an **active**
+bridge to work or any other schedule, block preview and offer **Pause outbound
+bridges** or a different private calendar. Before pausing, list the affected
+destinations and say plainly that existing managed copies remain; enabling no-
+copy does not delete, detach, or redact them, and the current alpha has no
+cleanup flow. A paused bridge permits preview but retains that warning. The
+bridge wizard and resume action apply the opposite block whenever either
+endpoint is protected by any non-deleted no-copy rule, even a paused rule.
+
+If a selected availability calendar is the destination of an active **or
+paused** bridge, block preview with `availability_copy_feedback`. Pausing is not
+enough because surviving inbound copies can appear as private busy time; choose
+a dedicated clean calendar until an explicit bridge-copy cleanup flow exists.
+Never imply
+that the whole installation has zero copies when older bridge copies remain.
+
+The composer repeats **Private replies create no personal-event copies**
+immediately before the primary **Preview automatic declines** action. If no `both` work account
+exists, disable creation and explain how to reconnect it. If no availability-
+only account exists, allow event-readable source/both calendars but recommend
+the narrower connection rather than misrepresenting whole-installation storage.
+Availability-only calendar rows may carry `readable: false`; use
+`capabilities.freebusy_readable: true` to show **Free/busy only**, never
+**Unreadable** or an event-read permission.
+
+Do not show two delegated Google aliases of one underlying calendar as valid
+source/destination or response/availability choices. If submitted anyway, map
+`same_provider_calendar` to **These choices point to the same Google calendar**.
+A quarantined historical alias self-copy bridge is not an ordinary user pause:
+show it as stopped for safety, explain that old destination copies remain, and
+offer review guidance from audit reason
+`policy.quarantined_same_provider_calendar` without offering Resume.
+
+When reauthorization returns `availability_role_change_blocked`, explain that
+pausing is not enough. Offer retirement for supported planning/private-reply
+rules. For a bridge or historical projection/action blocker, state that this
+alpha cannot safely retire/purge it and recommend keeping the broader role or
+connecting a separate dedicated availability-only Google account. Never
+instruct the user to edit PostgreSQL or imply the privacy downgrade succeeded. A
+successful transition can report the audited
+counts of observations/cursors removed and endpoints restricted.
+
+When OAuth returns `oauth_scope_overbroad`, explain: **Google kept broader
+calendar access from an earlier connection. Revoke Planipus in your Google
+account, then connect again as Free/busy only.** Do not imply that retrying the
+same callback, pausing a rule, or changing a Planipus label removed Google's
+grant. The existing connection/data state remains unchanged until a later
+successful guarded callback.
+Map `oauth_scope_unverified` to the same recovery with **Google did not report
+which calendar access it granted, so Planipus stopped instead of guessing.**
+
+Preview shows:
+
+- `0 new calendar copies from this rule` as the leading count; if a bridge was
+  paused, separately show its remaining managed-copy count/impact;
+- eligible conflicting invitation count and selected private calendar count;
+- the total unanswered work invitations checked, overlaps found, and conflicts
+  safely held for missing revision;
+- at most three time-only examples—no title, event ID, personal event identity,
+  calendar content, attendee, or reason revealing private subject matter;
+- exact configured response comment;
+- expiry and a statement that activation rechecks invitation and availability;
+- calm mapped warnings for paused legacy copies, broader source/both storage,
+  and conflicts above the 20-per-rolling-24-hours automatic decline budget;
+- `provider_writes_enabled` as an activation gate; and
+- `message_delivery` as **Simulated** or **Not verified by Google**, never as a
+  generic success badge.
+
+The primary action is **Turn on private conflict replies**. If the preview goes
+stale, retain the draft, explain that invitation or availability changed, and
+offer **Refresh preview**; never activate an older result.
+
+Active rule cards show work calendar, On/Paused, selected private calendar
+count, `0 copies created by this rule`, configured message, declined/pending/
+held counts, horizon, safe error and last safe check. Explain that a successful
+work sync triggers a check immediately and the 15-minute timer is a fallback.
+Actions are **Check now**,
+**Pause/Resume**, and **Retire private replies**. Retirement confirmation says
+pending/held actions are superseded, applied declines are not undone, old bridge
+copies are not cleaned, and a previously paused bridge may then resume. Only one
+live rule may control the same provider work calendar/alias. Raw safe error
+codes should ultimately map to calm explanations and repair actions; exposing
+underscore-separated codes is alpha debt.
+
+Map `decline_comment_not_retained` to **Reply declined; Google did not retain the
+comment** with supporting copy: “The meeting is declined and counts toward your
+24-hour safety limit. Planipus will not keep rewriting a confirmed response.”
+This is an applied-with-warning state, not held/failed and not proof the
+organizer saw a message. Budget copy explains that immutable decline history
+survives reschedules, retirement, and internal action reuse.
+
+That warning may appear when the first exact check for a pending action already
+finds the meeting declined. In that recovery case Planipus made no new write but
+conservatively counts the result because it cannot distinguish a previous
+crash-after-write from a manual decline. Say **No additional reply was sent**;
+never claim Planipus definitely caused the decline. Accepted/tentative responses
+remain untouched.
+
+A release-gate notice remains visible while live Google behavior is unproven:
+Google documents the RSVP status change, not guaranteed organizer delivery of
+the attendee comment. Planipus requests a quiet update and deliberately avoids
+broad guest notifications, but cannot promise that Google sends no email. When
+`provider_writes_enabled=false`, disable **Turn on private conflict replies** and
+explain that activation will return `invitation_writes_disabled`; preview remains
+available, but no active rule is created. Disable rule **Resume** for the same
+reason. Fake mode is visibly **Simulated**.
+Even when the Google write gate is on, keep message delivery labeled **Not
+verified by Google** and never imply that the provider RSVP or comment changed
+until apply succeeds.
+
+This screen is Server-only. Do not show it disabled in Mac or imply Kubernetes
+can continue a Mac-installed rule.
+
 ## Protect: Hours and availability fences
 
 The Protect screen starts with a permanent distinction:
@@ -378,6 +542,38 @@ external-attendee free/busy, provider recurrence exceptions, RSVP/decline
 handling, manual-move locking, and live invitation/update recovery are also
 incomplete.
 
+## Settings: API tokens and MCP
+
+Only the owner browser session can manage machine credentials. The default form
+uses a human label, `Read` + `Preview` scopes, 90-day expiry in the current UI,
+and leaves `Apply` unchecked. Copy explains that Apply can activate/pause/resume/
+reconcile and also requires an MCP process opt-in; it is not needed for reading
+or previews.
+
+After creation, show the plaintext token in a one-time panel with:
+
+- **Copy token**;
+- **Copy MCP configuration** using the current public API origin;
+- warning that dismissing loses the value and it cannot be recovered; and
+- explicit instruction to store it as a secret, never in Git or chat.
+
+The generated MCP configuration defaults
+`PLANIPUS_MCP_ENABLE_APPLY=false` even if a broader token was issued, unless the
+owner makes a separate deliberate choice. Explain that MCP is a local stdio
+process that calls this Server API; it is not a remote endpoint and does not
+connect to Planipus for Mac.
+
+The token list shows label, scopes, creation, expiry, last used, revoked state,
+and **Revoke**. It never shows token prefix/material beyond non-secret metadata.
+Revocation confirmation names the likely client impact and is not bundled with
+calendar/provider cleanup. Expired/revoked tokens remain clearly inactive until
+retention removes metadata.
+
+Required error states: owner authorization lost, expiry invalid, copy-to-
+clipboard unavailable, API tokens unavailable during migration, token expired,
+insufficient scope, MCP API unreachable, and apply disabled. Error copy must not
+echo a token or arbitrary remote body.
+
 ## Deletion and disconnect
 
 Destructive flows never combine unrelated choices.
@@ -404,6 +600,12 @@ Protect and Meet additionally distinguish `Planning`, `Pending provider write`,
 status cannot be derived from bridge status. An unmet meeting is not an error if
 the rule correctly refused to escape Meeting Hours; it is an action-needed
 scheduling result.
+
+Private replies additionally distinguish `No eligible invitations`, `Preview
+expired/stale`, `Waiting to check`, `Held safely`, `Declined`, `Paused`,
+`Reconnect for free/busy`, and `Google invitation replies disabled`. A held
+action is success of a safety check, not a silent failure and not a completed
+provider decline.
 
 ## Accessibility and responsive behavior
 

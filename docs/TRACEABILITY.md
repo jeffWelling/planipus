@@ -31,14 +31,22 @@ for wording/priority is `REQUIREMENTS.md`.
 | MTG-005 | SOLVER, API, UX-SPEC | post-sync | booking displacement preview policy tests |
 | MTG-006 | DATA-MODEL, API, INTEGRATIONS | post-sync | workflow idempotency/replay/fault tests |
 | MTG-007 | DATA-MODEL, SECURITY, UX-SPEC | post-sync | privacy-safe rule fixtures/browser |
+| NCR-001 | CONFLICT-RESPONSE-AND-MCP, API, UX-SPEC | S1C | strict draft/calendar capability API and browser tests |
+| NCR-002 | CONFLICT-RESPONSE-AND-MCP, INTEGRATIONS, SECURITY | S1C | OAuth scope golden + no-event-sync/database inspection + live consent |
+| NCR-003 | CONFLICT-RESPONSE-AND-MCP, API, DATA-MODEL | S1C | preview no-write/expiry/one-use/stale/privacy tests |
+| NCR-004 | CONFLICT-RESPONSE-AND-MCP, TESTING | S1C | eligibility decision table plus concurrent provider exact-read cases |
+| NCR-005 | CONFLICT-RESPONSE-AND-MCP, ARCHITECTURE, TEST-STRATEGY | S1C | real-PostgreSQL coordinator fault/idempotency/concurrency suite |
+| NCR-006 | CONFLICT-RESPONSE-AND-MCP, SECURITY, DATA-MODEL | S1C | SQL/job/audit/log/metric/API/MCP/backup forbidden-data inspection |
+| NCR-007 | CONFLICT-RESPONSE-AND-MCP, API, UX-SPEC, OPERATIONS | S1C | actor/tenant/pause/resume/reconcile/restore lifecycle suite |
+| NCR-008 | CONFLICT-RESPONSE-AND-MCP, INTEGRATIONS, TESTING | S1C release gate | disposable Google comment/mail/recurrence/concurrency evidence |
 | CAL-001 | INTEGRATIONS, OPERATIONS | M5 | named provider fixture + disposable live suite |
 | CAL-002 | DATA-MODEL, INTEGRATIONS | M1/M5 | recurrence/attendee/timezone round-trip fixtures |
 | CAL-003 | ARCHITECTURE, INTEGRATIONS | M1/M5 | dropped/out-of-order/cursor fault injection |
 | CAL-004 | DATA-MODEL, INTEGRATIONS | M1 | privacy transform/recursion/convergence tests |
 | CAL-005 | INTEGRATIONS | post-sync adapters | per-adapter mapping/conflict contract |
 | CAL-006 | DATA-MODEL, INTEGRATIONS, OPERATIONS | M5 | import dry run/round-trip/export/restore |
-| CAL-007 | API | M5 | OpenAPI diff + every UI command mapping |
-| CAL-008 | API, SECURITY | M5 | MCP capability/injection/plan-path tests |
+| CAL-007 | API, SECURITY, CONFLICT-RESPONSE-AND-MCP | S1C/M5 | token lifecycle/scope/tenant matrix + OpenAPI diff + UI command mapping |
+| CAL-008 | API, SECURITY, CONFLICT-RESPONSE-AND-MCP | S1C/M5 | MCP API-only boundary/tool-resource map/default-no-apply/injection tests |
 | CAL-009 | CALENDAR-SYNC, DATA-MODEL, INTEGRATIONS, API, UX-SPEC | M1 | two-account policy preview/activation and automatic source-change convergence |
 | CAL-010 | CALENDAR-SYNC, DATA-MODEL, INTEGRATIONS | M1 | hours interval property/golden suite plus DST and live Google cases |
 | CAL-011 | CALENDAR-SYNC, INTEGRATIONS, SECURITY, UX-SPEC | M1 | provider payload goldens and third-viewer disclosure suite |
@@ -59,6 +67,7 @@ for wording/priority is `REQUIREMENTS.md`.
 | SEC-006 | DATA-MODEL, API, SECURITY | M5/1.0 | timed export/deletion/provider cleanup drill |
 | SEC-007 | API, INTEGRATIONS, SECURITY | all/1.0 | negative security suites and penetration test |
 | SEC-008 | DATA-MODEL, SECURITY, INTEGRATIONS | post-1.0 | conformance/security/edition audit |
+| SEC-009 | SECURITY, CONFLICT-RESPONSE-AND-MCP, REUSE-MAP | S1C | machine-secret/threat/privacy/provider/supply-chain release matrix |
 | MAC-001 | MACOS-AND-KUBERNETES, UX-SPEC | M0/M1 | native critical-flow UI tests and WebView/runtime inspection |
 | MAC-002 | MACOS-AND-KUBERNETES, SECURITY, INTEGRATIONS | M0/M1 | installed-app OAuth state/PKCE/Keychain and secret-leak suite |
 | MAC-003 | MACOS-AND-KUBERNETES, ARCHITECTURE, DATA-MODEL | M0 | binary/process/network inspection plus local-store/outbox tests |
@@ -77,6 +86,7 @@ for wording/priority is `REQUIREMENTS.md`.
 | OPS-004 | OPERATIONS, TEST-STRATEGY | M2/1.0 | reproducibility/SBOM/provenance/signature |
 | OPS-005 | OPERATIONS | M2/M5 | render/admission/install/upgrade/restore |
 | OPS-006 | ADOPT-OR-BUILD, REUSE-MAP, OPERATIONS | G0/1.0 | license/source/capability-gate/egress audit |
+| OPS-007 | OPERATIONS, CONFLICT-RESPONSE-AND-MCP, TESTING | S1C/S2 | token/MCP/reauth/conflict/restore/incident runbook drills |
 
 ## Alpha planning evidence map (2026-07-21)
 
@@ -109,6 +119,23 @@ The clean-room boundary is invariant across this evidence: Keeper and other
 AGPL-licensed implementation material are prohibited as source, schema, fixture,
 test oracle, dependency, translation target, or donor code. Behavioral research
 does not count as implementation evidence.
+
+## API/MCP/no-copy evidence map (2026-07-21)
+
+This is partial implementation evidence, not verification. Exact commands and
+open gates live in
+`evidence/2026-07-21-mcp-api-conflict-response.md` and `TESTING.md`.
+
+| Requirement | Present artifact/evidence | Why the requirement is not verified |
+|---|---|---|
+| CAL-007 | Migration 0006, token service, owner-only settings/API routes, bearer actor boundary; provider-contact sensitivity docs; process-local read/apply/propose windows, 10-live-preview preflight, safe 429 and focused propose-limit API test | No complete OpenAPI schemas/compatibility, real-PostgreSQL token/preview lifetime/concurrency, shared persistent multi-replica limiter, restart/cardinality/bypass/read/apply matrix, planning/public-specific abuse controls, narrower-preview-scope decision, support policy, or restore/rotation drill |
+| CAL-008 | Official SDK stdio package, strict config/client/schemas, static resources, provider-contacting preview open-world metadata, read/propose default and opt-in apply/retire tools; 300-second bounded-fan-out deadline; read versus unknown-mutation timeout tests; source boundary/tests | No real slow API/provider E2E, outer-host abort/state-read retry proof, packaged MCP-host matrix, long-running secret rotation, model injection assessment, or remote transport (intentionally absent) |
+| NCR-001/NCR-003 | Strict parser, free/busy engine, preview/service/routes/UI, migrations 0007–0014, provider-identity uniqueness, canonical bridge/protected-availability identities, self-copy quarantine SQL/audit, retirement, pure/API tests, and an opt-in PostgreSQL fake-provider lifecycle plus delegated-alias rejection/no-copy activation-lock race | PostgreSQL result is not yet attached to the consolidated gate; no seeded 0013→0014 quarantine execution, complete both-winner/inbound/multi-destination/resume/retire alias race matrix, paused-bridge surviving-copy UX proof, expiry/fault lifecycle, or complete browser/accessibility evidence |
+| NCR-002/NCR-006 | Availability role/scopes and distinct freebusy/event-read capability, overbroad/missing returned-grant rejection, subject-serialized first-connect helper, provider free/busy port, atomic role-downgrade purge/guard implementation, no personal identity/content fields, domain-separated HMAC/unit assertions | No PostgreSQL first-connect/dependency/purge/in-flight-sync race evidence, live Google grant revoke/reconnect/downgrade proof, post-run SQL/job/audit/log/metric/backup inspection, offline-enumeration/rotation proof, or long-term retention proof |
+| NCR-004/NCR-005 | Bounded eligibility engine; response-sync-triggered reconciliation; immutable decline-audit provider-identity budget with PostgreSQL action-mutation/retire-recreate/20-hold assertions; exact provider recheck; initial already-declined no-PATCH and ambiguous network/5xx/malformed-response verification fixtures; persisted dropped-comment applied warning; answered/organizer/cancelled fixtures | No actual scheduler/worker/PostgreSQL trigger, concurrent budget/alias/fault lifecycle, coordinator-level initial-recovery audit/budget idempotency, completion-timestamp assertion, live provider concurrency, quota, recurrence, or crash-after-commit proof |
+| NCR-007 | Service/API/MCP pause/resume/reconcile/retire and rule/action status/audit design; browser controls and dropped-comment safe warning contract | No complete authorization/delegation, edit, retention/export, historical-copy/action purge, warning UI evidence, operational health, restore, or runbook drill |
+| NCR-008 | Strict config flag defaults false; preview/list/capabilities separate provider-write and message-delivery state; activation refuses a disabled gate; Google fixtures assert conditional self attendee/comment/`sendUpdates=none` and a verified decline with unretained comment | Capability/warning UI integration and organizer-visible comment or mail/calendar notification behavior lack release evidence; Google delivery remains unverified even when writes are enabled |
+| SEC-009/OPS-007 | Hashed/scoped token design, MCP apply double gate, official SDK provenance/notice, domain-separated private HMAC and controlled-rotation runbook, scheduled-job lease/3 heartbeat plus final-renewal/lease-loss unit tests, docs/evidence ledger | Consolidated gates, competing-worker/uncancellable-provider-call and HMAC rotation/fault proof, and online audit are not yet attached; provider I/O under locks remains a release concern and the Hono moderate advisory is accepted only for unreachable stdio path pending upstream |
 
 ## Updating status
 

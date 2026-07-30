@@ -15,11 +15,18 @@ exact lockfile and image digests.
 | Fastify | 5.10.0 | MIT | Server HTTP runtime |
 | Google Auth Library for Node.js | 10.9.0 | Apache-2.0 | Google OAuth and token refresh |
 | Kysely | 0.29.0 | MIT | typed PostgreSQL queries |
+| Model Context Protocol TypeScript SDK | 1.29.0 | MIT | local stdio MCP server and protocol transport |
 | `pg` | 8.16.3 | MIT | PostgreSQL protocol client |
 | `prom-client` | 15.1.3 | Apache-2.0 | redacted operational metrics |
 | `temporal-polyfill` | 1.0.1 | MIT | deterministic timezone/hour evaluation |
-| `uuid` | 11.1.0 | MIT | stable identifiers |
+| `uuid` | 11.1.1 | MIT | stable identifiers |
+| Zod | 4.1.12 | MIT | strict MCP tool-input schemas |
 | React / React DOM | 19.2.7 | MIT | Server web interface |
+
+The MCP SDK is the official MIT-licensed
+[`modelcontextprotocol/typescript-sdk`](https://github.com/modelcontextprotocol/typescript-sdk)
+package. Planipus uses its stdio transport only. It does not ship the SDK's
+optional HTTP/static-file serving path as an exposed Planipus MCP transport.
 
 Planipus for Mac resolves these runtime packages through `macos/Package.resolved`:
 
@@ -66,12 +73,20 @@ Before public distribution:
 2. archive every required license and notice text;
 3. run a current vulnerability and license-policy scan without silently sending
    private repository metadata to an unapproved service;
-4. classify every reachable critical/high advisory and the single moderate
-   advisory reported by the 2026-07-21 local npm install; and
+4. classify every reachable critical/high advisory and every accepted lower
+   severity advisory; the current known remainder is a moderate
+   `@hono/node-server` Windows serve-static advisory transitively installed by
+   the MCP SDK, unreachable in Planipus's stdio-only MCP process and accepted
+   temporarily pending an upstream SDK dependency update;
 5. verify the downloaded SQLCipher XCFramework checksum recorded by SwiftPM and
    archive the matching source/license correspondence; and
 6. record the exact Node, Swift/Xcode, image, and chart digests in release
    evidence.
+
+The direct `uuid` package was upgraded to 11.1.1. The Hono disposition must be
+reopened before any remote/Streamable HTTP MCP transport is added. A current
+online audit still must be attached to release evidence; this notice does not
+replace it.
 
 ## Excluded research sources
 

@@ -51,6 +51,19 @@ export interface BrowserSessionTable {
   created_at: GeneratedTimestamp;
 }
 
+export interface ApiTokenTable {
+  id: string;
+  organization_id: string;
+  principal_id: string;
+  label: string;
+  token_hash: string;
+  scopes: Json;
+  expires_at: Timestamp;
+  last_used_at: Timestamp | null;
+  revoked_at: Timestamp | null;
+  created_at: GeneratedTimestamp;
+}
+
 export interface OAuthTransactionTable {
   id: string;
   principal_id: string;
@@ -72,7 +85,7 @@ export interface ProviderConnectionTable {
   remote_subject: string;
   account_label: string;
   display_label: string;
-  intended_role: "source" | "destination" | "both";
+  intended_role: "availability" | "source" | "destination" | "both";
   email_masked: string;
   credential_envelope: Json;
   key_version: string;
@@ -120,6 +133,8 @@ export interface SyncPolicyTable {
   name: string;
   source_calendar_id: string;
   destination_calendar_id: string;
+  source_provider_identity: string;
+  destination_provider_identity: string;
   hours_profile_id: string | null;
   status: "active" | "paused" | "deleted";
   revision: number;
@@ -256,7 +271,7 @@ export interface AuditFactTable {
   id: string;
   organization_id: string;
   principal_id: string | null;
-  actor_kind: "user" | "sync" | "recovery";
+  actor_kind: "user" | "api_token" | "sync" | "recovery";
   action: string;
   target_type: string;
   target_id: string;
@@ -346,11 +361,74 @@ export interface PlanningSuggestionTable {
   updated_at: GeneratedTimestamp;
 }
 
+export interface ConflictResponsePreviewTable {
+  id: string;
+  organization_id: string;
+  principal_id: string;
+  draft_document: Json;
+  draft_hash: string;
+  input_snapshot_hash: string;
+  result_document: Json;
+  reference_at: Timestamp;
+  expires_at: Timestamp;
+  consumed_at: Timestamp | null;
+  created_at: GeneratedTimestamp;
+}
+
+export interface ConflictResponseRuleTable {
+  id: string;
+  organization_id: string;
+  owner_principal_id: string;
+  name: string;
+  response_calendar_id: string;
+  response_provider_identity: string;
+  status: "active" | "paused" | "deleted";
+  revision: number;
+  rule_document: Json;
+  rule_hash: string;
+  last_evaluated_at: Timestamp | null;
+  last_success_at: Timestamp | null;
+  safe_error_code: string | null;
+  created_at: GeneratedTimestamp;
+  updated_at: GeneratedTimestamp;
+}
+
+export interface ConflictResponseAvailabilityCalendarTable {
+  organization_id: string;
+  rule_id: string;
+  calendar_endpoint_id: string;
+  provider_calendar_identity: string;
+  created_at: GeneratedTimestamp;
+}
+
+export interface InvitationResponseActionTable {
+  id: string;
+  organization_id: string;
+  rule_id: string;
+  rule_revision: number;
+  response_calendar_id: string;
+  work_observation_id: string;
+  remote_event_id: string;
+  recurrence_identity: string;
+  work_observation_hash: string;
+  conflict_basis_hash: string;
+  expected_remote_revision: string | null;
+  desired_comment: string;
+  status: "pending" | "applied" | "superseded" | "held";
+  remote_revision: string | null;
+  last_attempt_at: Timestamp | null;
+  last_success_at: Timestamp | null;
+  safe_error_code: string | null;
+  created_at: GeneratedTimestamp;
+  updated_at: GeneratedTimestamp;
+}
+
 export interface DatabaseSchema {
   organizations: OrganizationTable;
   principals: PrincipalTable;
   memberships: MembershipTable;
   browser_sessions: BrowserSessionTable;
+  api_tokens: ApiTokenTable;
   oauth_transactions: OAuthTransactionTable;
   provider_connections: ProviderConnectionTable;
   calendar_endpoints: CalendarEndpointTable;
@@ -368,4 +446,8 @@ export interface DatabaseSchema {
   planning_rules: PlanningRuleTable;
   planned_events: PlannedEventTable;
   planning_suggestions: PlanningSuggestionTable;
+  conflict_response_previews: ConflictResponsePreviewTable;
+  conflict_response_rules: ConflictResponseRuleTable;
+  conflict_response_availability_calendars: ConflictResponseAvailabilityCalendarTable;
+  invitation_response_actions: InvitationResponseActionTable;
 }

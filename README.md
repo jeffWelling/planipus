@@ -32,6 +32,45 @@ Google planning writes are deliberately default-off behind
 `PLANIPUS_EXPERIMENTAL_GOOGLE_PLANNING=true` until the live invitation and
 ordinary-viewer evidence suite passes.
 
+The Server now also has a **no-copy conflict response** alpha. A personal
+account connected with the strict-private `availability` role supplies opaque
+provider free/busy intervals only. Its calendar appears as event-content
+`readable: false` plus `capabilities.freebusy_readable: true` in API/MCP output.
+Changing a previously used source/both account to this role is blocked until
+event-content dependencies are safely removed; Planipus never silently leaves or
+repopulates mirrored observations after a successful privacy downgrade.
+Planipus can then decline a future work invitation that is still awaiting the
+connected work attendee's response, using a static configurable comment—without
+creating a personal-event copy on the work calendar. Organizer events and
+accepted, tentative, declined,
+cancelled, all-day, started, changed, or no-longer-conflicting invitations fail
+closed. A selected private availability calendar is protected from active
+bridges in either direction; an outbound bridge may be paused first and leaves
+its copies behind, while an inbound bridge blocks protection even when paused.
+Google delegated aliases share one canonical calendar identity, so they cannot
+self-copy or bypass protection. An availability-only OAuth callback refuses any
+broader Calendar grant Google retained from an older consent; revoke that grant
+at Google and reconnect rather than assuming access narrowed. It also fails
+closed if Google does not report the granted scope set.
+Live Google RSVP writes default off behind
+`PLANIPUS_EXPERIMENTAL_GOOGLE_INVITATION_DECLINE=false` until comment visibility
+and mail/notification behavior are proven with disposable accounts; Google
+guarantees the RSVP status boundary, not organizer delivery of the comment. A
+provider-confirmed decline with an unretained comment stays applied, consumes
+the immutable 20-per-24-hour safety budget, and appears as a warning rather than
+being repeatedly rewritten. If a pending action's first exact check already
+finds it declined, Planipus sends no additional reply and conservatively applies/
+budgets that recovery result; it never overwrites accepted or tentative answers.
+
+Planipus Server exposes the same authority through its HTTP API and an optional
+local stdio MCP adapter. The adapter calls only the API with dedicated,
+expiring, scoped tokens. Read/proposal tools are registered by default, but a
+least-privilege token contains only `read`; conflict proposal contacts provider
+free/busy and is explicitly MCP open-world. Apply tools require an `apply` token
+plus an explicit process flag. There is no remote
+Streamable HTTP MCP endpoint yet. See the complete
+[API/MCP/conflict-response contract](docs/CONFLICT-RESPONSE-AND-MCP.md).
+
 ## Open-source strategy: compose, do not copy
 
 Planipus composes selected, pinned open-source and platform building blocks under
@@ -81,7 +120,7 @@ swift build -c release --package-path macos
 ```
 
 `npm run verify` builds workspaces in dependency order, type-checks and tests
-the shared contract, Server and web app, checks all 91 canonical fixtures, then
+the shared contract, Server, web app, and MCP adapter, checks all 91 canonical fixtures, then
 runs documentation and excluded-donor provenance gates. It does not contact
 Google or mutate a calendar.
 
@@ -113,8 +152,30 @@ redirect URI is
 `https://YOUR_PLANIPUS_HOST/api/v1/connections/google/callback`, set provider
 mode to `google`, configure both Google credentials, and serve Planipus over
 HTTPS. Do not use production calendars until the live-provider acceptance
-matrix is ready. Source connections request read-only calendar access;
-destination connections request event-write access.
+matrix is ready. Availability-only connections request CalendarList and
+free/busy without event-list access; source connections add read-only event
+access; destination connections request event-write access; `both` is required
+for a work calendar that must be read and respond to invitations. Existing
+source/both connections require reauthorization for the new free/busy grant.
+
+## Run the MCP adapter
+
+Create a short-lived `read` API token in Server Settings and add `propose` only
+if that MCP host needs preview tools. Copy its plaintext value immediately
+because Planipus stores only its hash. Configure an MCP host to launch the built
+stdio command with secrets in its private environment:
+
+```sh
+export PLANIPUS_API_URL="https://YOUR_PLANIPUS_HOST"
+export PLANIPUS_API_TOKEN="pln_api_REPLACE_WITH_ONE_TIME_VALUE"
+export PLANIPUS_MCP_ENABLE_APPLY="false"
+npm run build --workspace @planipus/mcp
+node mcp/dist/src/stdio.js
+```
+
+Plain HTTP is accepted only for loopback development. To expose mutation tools,
+issue a separate `apply` token and set the process flag to `true`; the API still
+checks scope on every request. Do not put the stdio process behind an ingress.
 
 ## Run Planipus for Mac
 
@@ -149,14 +210,15 @@ TLS, NetworkPolicy, backup, restore, upgrade and reconciliation requirements.
 
 1. [New-session handoff](docs/HANDOFF.md)
 2. [Calendar Sync product contract](docs/CALENDAR-SYNC.md)
-3. [Reclaim and market research](docs/RESEARCH.md)
-4. [Adoption decision](docs/ADOPT-OR-BUILD.md)
-5. [Clean-room policy](docs/CLEAN-ROOM-POLICY.md) and [Keeper behavioral research audit](docs/evidence/2026-07-20-keeper-audit.md)
-6. [Foundation gate](docs/FOUNDATION-GATE.md)
-7. [Requirements](docs/REQUIREMENTS.md) and [traceability](docs/TRACEABILITY.md)
-8. [Architecture](docs/ARCHITECTURE.md), [data model](docs/DATA-MODEL.md), and
+3. [No-copy conflict response, API, and MCP contract](docs/CONFLICT-RESPONSE-AND-MCP.md)
+4. [Reclaim and market research](docs/RESEARCH.md)
+5. [Adoption decision](docs/ADOPT-OR-BUILD.md)
+6. [Clean-room policy](docs/CLEAN-ROOM-POLICY.md) and [Keeper behavioral research audit](docs/evidence/2026-07-20-keeper-audit.md)
+7. [Foundation gate](docs/FOUNDATION-GATE.md)
+8. [Requirements](docs/REQUIREMENTS.md) and [traceability](docs/TRACEABILITY.md)
+9. [Architecture](docs/ARCHITECTURE.md), [data model](docs/DATA-MODEL.md), and
    [integration contracts](docs/INTEGRATIONS.md)
-9. [Roadmap](docs/ROADMAP.md), [backlog](docs/TODO.md), and
+10. [Roadmap](docs/ROADMAP.md), [backlog](docs/TODO.md), and
    [decisions](docs/DECISIONS.md)
 
 ## Product principles

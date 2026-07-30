@@ -17,6 +17,7 @@ export interface ServerConfig {
   readonly googleClientId: string | null;
   readonly googleClientSecret: string | null;
   readonly experimentalGooglePlanning?: boolean;
+  readonly experimentalGoogleInvitationDecline?: boolean;
   readonly migrationsDirectory: string;
   readonly migrationAttempts: number;
   readonly schedulerIntervalMs: number;
@@ -125,6 +126,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     problems.push("PLANIPUS_EXPERIMENTAL_GOOGLE_PLANNING must be true or false");
   }
   const experimentalGooglePlanning = experimentalGooglePlanningText === "true";
+  const experimentalGoogleInvitationDeclineText = env["PLANIPUS_EXPERIMENTAL_GOOGLE_INVITATION_DECLINE"];
+  if (experimentalGoogleInvitationDeclineText !== undefined
+    && experimentalGoogleInvitationDeclineText !== "true"
+    && experimentalGoogleInvitationDeclineText !== "false") {
+    problems.push("PLANIPUS_EXPERIMENTAL_GOOGLE_INVITATION_DECLINE must be true or false");
+  }
+  const experimentalGoogleInvitationDecline = experimentalGoogleInvitationDeclineText === "true";
 
   const cookieSecureDefault = publicUrl.protocol === "https:";
   const cookieSecure = env["PLANIPUS_COOKIE_SECURE"] === undefined
@@ -149,6 +157,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     googleClientId,
     googleClientSecret,
     experimentalGooglePlanning,
+    experimentalGoogleInvitationDecline,
     migrationsDirectory: env["PLANIPUS_MIGRATIONS_DIR"]?.trim() || "migrations",
     migrationAttempts: integer(env, "PLANIPUS_MIGRATION_ATTEMPTS", 30, 1, 300, problems),
     schedulerIntervalMs: integer(env, "PLANIPUS_SCHEDULER_INTERVAL_MS", 15_000, 1_000, 300_000, problems),

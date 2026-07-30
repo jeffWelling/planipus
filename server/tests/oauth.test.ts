@@ -8,7 +8,10 @@ import {
   GoogleOAuthError,
   GoogleOAuthService,
   googleScopesForRole,
-  normalizeConnectionIntent
+  removesEventReadAccess,
+  normalizeConnectionIntent,
+  resolveGoogleGrantedScopes,
+  validateGoogleGrantedScopes
 } from "../src/providers/google/oauth.js";
 
 describe("Google OAuth intent", () => {
@@ -33,6 +36,7 @@ describe("Google OAuth intent", () => {
 
     const scopes = new URL(authorization.authorizationUrl).searchParams.get("scope")?.split(" ") ?? [];
     expect(scopes).toContain("https://www.googleapis.com/auth/calendar.events.readonly");
+    expect(scopes).toContain("https://www.googleapis.com/auth/calendar.freebusy");
     expect(scopes).not.toContain("https://www.googleapis.com/auth/calendar.events");
   });
 
@@ -40,6 +44,14 @@ describe("Google OAuth intent", () => {
     expect(googleScopesForRole("destination")).toContain("https://www.googleapis.com/auth/calendar.events");
     expect(googleScopesForRole("both")).toContain("https://www.googleapis.com/auth/calendar.events");
     expect(googleScopesForRole("source")).not.toContain("https://www.googleapis.com/auth/calendar.events");
+    expect(googleScopesForRole("source")).toContain("https://www.googleapis.com/auth/calendar.freebusy");
+    expect(googleScopesForRole("both")).toContain("https://www.googleapis.com/auth/calendar.freebusy");
+    expect(googleScopesForRole("destination")).not.toContain("https://www.googleapis.com/auth/calendar.freebusy");
+    expect(googleScopesForRole("availability")).toContain("https://www.googleapis.com/auth/calendar.freebusy");
+    expect(googleScopesForRole("availability"))
+      .not.toContain("https://www.googleapis.com/auth/calendar.events.freebusy");
+    expect(googleScopesForRole("availability")).not.toContain("https://www.googleapis.com/auth/calendar.events.readonly");
+    expect(googleScopesForRole("availability")).not.toContain("https://www.googleapis.com/auth/calendar.events");
   });
 
   it("rejects hidden labels and unknown roles before persisting OAuth state", () => {
@@ -47,6 +59,37 @@ describe("Google OAuth intent", () => {
       .toThrowError(GoogleOAuthError);
     expect(() => normalizeConnectionIntent({ label: "Work", role: "sideways" as "source" }))
       .toThrowError(GoogleOAuthError);
+  });
+
+  it("requires an explicit data migration whenever a reauthorization removes event reads", () => {
+    expect(removesEventReadAccess("source", "availability")).toBe(true);
+    expect(removesEventReadAccess("both", "availability")).toBe(true);
+    expect(removesEventReadAccess("both", "destination")).toBe(true);
+    expect(removesEventReadAccess("availability", "source")).toBe(false);
+    expect(removesEventReadAccess("source", "both")).toBe(false);
+  });
+
+  it("fails availability-only completion when Google retains event scopes", () => {
+    const availability = googleScopesForRole("availability");
+    expect(() => validateGoogleGrantedScopes("availability", availability)).not.toThrow();
+    expect(() => validateGoogleGrantedScopes("availability", [
+      ...availability,
+      "https://www.googleapis.com/auth/calendar.events.readonly"
+    ])).toThrowError(expect.objectContaining({ code: "oauth_scope_overbroad" }));
+    expect(() => validateGoogleGrantedScopes("availability", [
+      ...availability,
+      "https://www.googleapis.com/auth/calendar.events.freebusy"
+    ])).toThrowError(expect.objectContaining({ code: "oauth_scope_overbroad" }));
+    expect(() => validateGoogleGrantedScopes("availability", availability.filter(
+      (scope) => scope !== "https://www.googleapis.com/auth/calendar.freebusy"
+    ))).toThrowError(expect.objectContaining({ code: "oauth_scope_incomplete" }));
+  });
+
+  it("fails closed when Google omits the availability grant scope report", () => {
+    expect(() => resolveGoogleGrantedScopes("availability", undefined))
+      .toThrowError(expect.objectContaining({ code: "oauth_scope_unverified" }));
+    expect(resolveGoogleGrantedScopes("source", undefined))
+      .toEqual(googleScopesForRole("source"));
   });
 });
 

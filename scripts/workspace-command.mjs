@@ -7,7 +7,8 @@ const steps = {
   build: [
     ["run", "build", "--workspace", "@planipus/calendar-sync"],
     ["run", "build", "--workspace", "@planipus/server"],
-    ["run", "build", "--workspace", "@planipus/web"]
+    ["run", "build", "--workspace", "@planipus/web"],
+    ["run", "build", "--workspace", "@planipus/mcp"]
   ],
   typecheck: [
     ["run", "typecheck", "--workspace", "@planipus/calendar-sync"],
@@ -15,13 +16,15 @@ const steps = {
     // Emit it first so this command also works immediately after `npm ci`.
     ["run", "build", "--workspace", "@planipus/calendar-sync"],
     ["run", "typecheck", "--workspace", "@planipus/server"],
-    ["run", "typecheck", "--workspace", "@planipus/web"]
+    ["run", "typecheck", "--workspace", "@planipus/web"],
+    ["run", "typecheck", "--workspace", "@planipus/mcp"]
   ],
   test: [
     // Server tests load the shared package's JavaScript export.
     ["run", "build", "--workspace", "@planipus/calendar-sync"],
     ["run", "test", "--workspace", "@planipus/calendar-sync"],
-    ["run", "test", "--workspace", "@planipus/server"]
+    ["run", "test", "--workspace", "@planipus/server"],
+    ["run", "test", "--workspace", "@planipus/mcp"]
   ]
 };
 

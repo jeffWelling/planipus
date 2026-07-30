@@ -141,10 +141,23 @@ export class EffectExecutor {
   ): Promise<void> {
     const policy = await transaction
       .selectFrom("sync_policies")
-      .select(["id", "status", "revision"])
-      .where("organization_id", "=", effect.organizationId)
-      .where("id", "=", effect.policyId)
-      .forUpdate()
+      .innerJoin("calendar_endpoints as source", "source.id", "sync_policies.source_calendar_id")
+      .innerJoin(
+        "provider_connections as source_connection",
+        "source_connection.id",
+        "source.connection_id"
+      )
+      .select([
+        "sync_policies.id",
+        "sync_policies.status",
+        "sync_policies.revision",
+        "source.readable as source_readable",
+        "source_connection.status as source_connection_status",
+        "source_connection.intended_role as source_connection_role"
+      ])
+      .where("sync_policies.organization_id", "=", effect.organizationId)
+      .where("sync_policies.id", "=", effect.policyId)
+      .forUpdate("sync_policies")
       .executeTakeFirst();
     const lease = await transaction
       .selectFrom("outbox_effects")
@@ -174,6 +187,33 @@ export class EffectExecutor {
       }
       if (disposition === "supersede_deleted") {
         await this.supersede(transaction, owner, effect, "policy_deleted");
+        return;
+      }
+      if (
+        !policy.source_readable
+        || policy.source_connection_status !== "active"
+        || (
+          policy.source_connection_role !== "source"
+          && policy.source_connection_role !== "both"
+        )
+      ) {
+        const changedAt = new Date();
+        await transaction.updateTable("sync_policies")
+          .set({ safe_error_code: "connection_role_changed", updated_at: changedAt })
+          .where("organization_id", "=", effect.organizationId)
+          .where("id", "=", effect.policyId)
+          .where("status", "=", "active")
+          .execute();
+        await this.fail(
+          transaction,
+          owner,
+          effect,
+          new ProviderError(
+            "connection_role_changed",
+            "source connection no longer authorizes event copying",
+            false
+          )
+        );
         return;
       }
     }

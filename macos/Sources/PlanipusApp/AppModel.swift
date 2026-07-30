@@ -86,12 +86,21 @@ final class AppModel: ObservableObject {
         let message: String
     }
 
+    struct AttentionItem: Identifiable {
+        let id: String
+        let title: String
+        let message: String
+    }
+
     @Published var hasCompletedFirstRun = false
     @Published var accounts: [Account] = []
     @Published var bridges: [Bridge] = []
     @Published var lifecycle: AppLifecycleLabel = .stopped
     @Published var oauthNotice: Notice?
     @Published var isConnectingGoogle = false
+    @Published private(set) var mascotIsSyncing = false
+    @Published private(set) var syncState: SyncState = .stopped
+    @Published private(set) var syncStatusMessage = "Sync is stopped"
 
     private let googleAuthorizer: (any GoogleOAuthAuthorizing)?
     private let googleCredentialInspector: (any GoogleCredentialInspecting)?
@@ -103,6 +112,9 @@ final class AppModel: ObservableObject {
     private var preparedPolicies: [String: SyncPolicy] = [:]
     private var productionStore: EncryptedPlanipusRepository?
     private var syncCoordinator: SyncCoordinator?
+    private var syncStatusMonitor: Task<Void, Never>?
+    private var syncPresentationDismissal: Task<Void, Never>?
+    private var syncPresentationStartedAt: Date?
     private var installationID: String?
     private let pathMonitor = NWPathMonitor()
     private let pathMonitorQueue = DispatchQueue(label: "org.planipus.macos.network-path")
@@ -140,6 +152,14 @@ final class AppModel: ObservableObject {
 
     func enterLocalPreview() {
         isPreviewMode = true
+        syncStatusMonitor?.cancel()
+        syncStatusMonitor = nil
+        syncPresentationDismissal?.cancel()
+        syncPresentationDismissal = nil
+        syncPresentationStartedAt = nil
+        mascotIsSyncing = false
+        syncState = .current
+        syncStatusMessage = "Sample calendars are ready"
         let coordinator = syncCoordinator
         let store = productionStore
         syncCoordinator = nil
@@ -262,6 +282,85 @@ final class AppModel: ObservableObject {
         accounts.filter { $0.role.hasDestinationCapability(in: $0.grantedScopes) }
     }
 
+    var attentionItems: [AttentionItem] {
+        var items = bridges.compactMap { bridge -> AttentionItem? in
+            guard let issue = bridge.issue else { return nil }
+            return AttentionItem(
+                id: "bridge-\(bridge.id)",
+                title: "\(bridge.sourceEmail) → \(bridge.destinationEmail)",
+                message: issue
+            )
+        }
+        if lifecycle == .offline {
+            items.append(AttentionItem(
+                id: "mac-offline",
+                title: "This Mac is offline",
+                message: "Planipus will resume checking calendars when the network returns."
+            ))
+        }
+        if syncState == .actionNeeded, !items.contains(where: { $0.id == "sync-action" }) {
+            items.append(AttentionItem(
+                id: "sync-action",
+                title: "Calendar sync needs a quick check",
+                message: syncStatusMessage
+            ))
+        }
+        return items
+    }
+
+    func syncNow() {
+        guard !mascotIsSyncing else { return }
+        syncState = .syncing
+        syncStatusMessage = "Comparing three calendars"
+        beginSyncPresentation()
+
+        if isPreviewMode {
+            Task { [weak self] in
+                do {
+                    try await Task.sleep(for: .milliseconds(350))
+                } catch {
+                    return
+                }
+                guard let self else { return }
+                applySyncStatus(SyncStatus(
+                    state: .current,
+                    message: "Sample calendars are in sync",
+                    lastSuccessfulSync: Date(),
+                    updatedAt: Date()
+                ))
+            }
+            return
+        }
+
+        guard let syncCoordinator else {
+            oauthNotice = Notice(
+                title: "Calendar sync is not ready",
+                message: Self.productionStoreMessage
+            )
+            syncState = .actionNeeded
+            syncStatusMessage = "Calendar sync is not ready"
+            finishSyncPresentation()
+            return
+        }
+
+        Task { [weak self] in
+            guard let self else { return }
+            let runnablePolicies = await validateCredentialBackedPolicies()
+            guard !runnablePolicies.isEmpty else {
+                oauthNotice = Notice(
+                    title: "There is no bridge ready to sync",
+                    message: "Enable a bridge with current Google account access, then try again."
+                )
+                syncState = .actionNeeded
+                syncStatusMessage = "No enabled bridge is ready to sync"
+                finishSyncPresentation()
+                return
+            }
+            let status = await syncCoordinator.runOnce(policies: runnablePolicies)
+            applySyncStatus(status)
+        }
+    }
+
     func createBridge(sourceAccountID: String, destinationAccountID: String) {
         guard sourceAccountID != destinationAccountID,
               let source = accounts.first(where: { $0.id == sourceAccountID }),
@@ -314,6 +413,8 @@ final class AppModel: ObservableObject {
 
     func quit() {
         lifecycle = .stopped
+        syncStatusMonitor?.cancel()
+        syncPresentationDismissal?.cancel()
         guard !isPreviewMode else {
             NSApplication.shared.terminate(nil)
             return
@@ -435,6 +536,7 @@ final class AppModel: ObservableObject {
                 installationID: configuration.installationID
             )
             syncCoordinator = coordinator
+            startSyncStatusMonitoring(coordinator)
             await coordinator.setLifecycle(coordinatorLifecycle)
             guard !isPreviewMode else {
                 syncCoordinator = nil
@@ -458,6 +560,8 @@ final class AppModel: ObservableObject {
         } catch {
             productionStore = nil
             syncCoordinator = nil
+            syncStatusMonitor?.cancel()
+            syncStatusMonitor = nil
             installationID = nil
             lifecycle = .stopped
             oauthNotice = Notice(
@@ -730,6 +834,60 @@ final class AppModel: ObservableObject {
             )
         }
         return runnable
+    }
+
+    private func startSyncStatusMonitoring(_ coordinator: SyncCoordinator) {
+        syncStatusMonitor?.cancel()
+        syncStatusMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                let status = await coordinator.status()
+                guard !Task.isCancelled else { return }
+                self?.applySyncStatus(status)
+                do {
+                    try await Task.sleep(for: .milliseconds(120))
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func applySyncStatus(_ status: SyncStatus) {
+        let previousState = syncState
+        syncState = status.state
+        syncStatusMessage = status.message
+
+        if status.state == .syncing {
+            if previousState != .syncing {
+                beginSyncPresentation()
+            }
+        } else if previousState == .syncing {
+            finishSyncPresentation()
+        }
+    }
+
+    private func beginSyncPresentation() {
+        syncPresentationDismissal?.cancel()
+        syncPresentationDismissal = nil
+        syncPresentationStartedAt = Date()
+        mascotIsSyncing = true
+    }
+
+    private func finishSyncPresentation() {
+        let elapsed = Date().timeIntervalSince(syncPresentationStartedAt ?? Date())
+        let remaining = max(0, 3 - elapsed)
+        syncPresentationDismissal?.cancel()
+        syncPresentationDismissal = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(remaining))
+            } catch {
+                return
+            }
+            guard let self, syncState != .syncing else { return }
+            syncPresentationStartedAt = nil
+            syncPresentationDismissal = nil
+            mascotIsSyncing = false
+        }
     }
 
     private var coordinatorLifecycle: AppLifecycle {

@@ -7,16 +7,29 @@ import { describe, expect, it } from "vitest";
 
 import type { DesiredCopy, SourceObservation } from "@planipus/calendar-sync";
 
+import { ApiTokenService } from "../src/auth/api-token.js";
+import { ConflictResponseCoordinator } from "../src/conflict-response/coordinator.js";
+import { countRecentAppliedDeclines } from "../src/conflict-response/inputs.js";
+import { ConflictResponseService } from "../src/conflict-response/service.js";
+import { ConflictPrivacyHasher } from "../src/conflict-response/privacy-hash.js";
 import { runMigrations } from "../src/database/migrate.js";
 import type { DatabaseSchema } from "../src/database/types.js";
-import { PostgresJobQueue } from "../src/jobs/queue.js";
+import { JobLeaseLostError, PostgresJobQueue } from "../src/jobs/queue.js";
 import { sharedPolicyRuntime } from "../src/policy/runtime.js";
 import { PolicyService, type PolicyDraft } from "../src/policy/service.js";
 import { repairFakeDemoCrossAccountEndpoints } from "../src/providers/fake-demo-repair.js";
 import { fakeAccessTokenForConnection } from "../src/providers/fake-token.js";
 import { FakeCalendarProvider } from "../src/providers/fake.js";
+import { loadGoogleConnectionForOAuthUpdate } from "../src/providers/google/oauth.js";
 import { FakeAccessTokenBroker, ProviderRouter } from "../src/providers/router.js";
-import { ProviderError, type ProviderWriteResult } from "../src/providers/types.js";
+import {
+  ProviderError,
+  type ProviderDeclineInvitationRequest,
+  type ProviderDeclineInvitationResult,
+  type ProviderFreeBusyRequest,
+  type ProviderFreeBusyResult,
+  type ProviderWriteResult
+} from "../src/providers/types.js";
 import { CalendarSyncCoordinator } from "../src/sync/coordinator.js";
 import { EffectExecutor, managedEventId } from "../src/sync/effects.js";
 import { calendarSyncQueryFingerprint } from "../src/sync/query.js";
@@ -79,6 +92,60 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
       expect(migrations.rows.map((row) => row.name)).toContain("0004_planning_rules.sql");
       expect(migrations.rows.map((row) => row.name))
         .toContain("0005_scheduled_job_history_lookup.sql");
+      expect(migrations.rows.map((row) => row.name)).toContain("0006_api_tokens.sql");
+      expect(migrations.rows.map((row) => row.name))
+        .toContain("0007_conflict_response_rules.sql");
+      expect(migrations.rows.map((row) => row.name))
+        .toContain("0008_availability_connection_role.sql");
+      expect(migrations.rows.map((row) => row.name))
+        .toContain("0009_conflict_response_uniqueness.sql");
+      expect(migrations.rows.map((row) => row.name))
+        .toContain("0010_conflict_invitation_candidates.sql");
+      expect(migrations.rows.map((row) => row.name))
+        .toContain("0011_private_availability_hmac.sql");
+      expect(migrations.rows.map((row) => row.name))
+        .toContain("0012_conflict_response_provider_identity.sql");
+      expect(migrations.rows.map((row) => row.name))
+        .toContain("0013_decline_budget_audit_index.sql");
+      expect(migrations.rows.map((row) => row.name))
+        .toContain("0014_canonical_calendar_protection.sql");
+
+      const apiTokens = new ApiTokenService(database);
+      const issuedToken = await apiTokens.issue(ORGANIZATION_ID, PRINCIPAL_ID, {
+        label: "Integration MCP",
+        scopes: ["apply"],
+        expires_in_days: 2
+      });
+      expect(issuedToken.token).toMatch(/^pln_api_[A-Za-z0-9_-]+$/);
+      expect(issuedToken.scopes).toEqual(["read", "propose", "apply"]);
+      const storedToken = await database.selectFrom("api_tokens")
+        .select(["token_hash", "scopes"])
+        .where("id", "=", issuedToken.tokenId)
+        .executeTakeFirstOrThrow();
+      expect(storedToken.token_hash).toMatch(/^[0-9a-f]{64}$/);
+      expect(storedToken.token_hash).not.toContain(issuedToken.token);
+      expect(storedToken.scopes).toEqual(["read", "propose", "apply"]);
+      await expect(apiTokens.authenticate(issuedToken.token)).resolves.toMatchObject({
+        tokenId: issuedToken.tokenId,
+        scopes: ["read", "propose", "apply"]
+      });
+      await database.updateTable("memberships")
+        .set({ role: "member" })
+        .where("organization_id", "=", ORGANIZATION_ID)
+        .where("principal_id", "=", PRINCIPAL_ID)
+        .executeTakeFirstOrThrow();
+      await expect(apiTokens.authenticate(issuedToken.token)).resolves.toBeNull();
+      await database.updateTable("memberships")
+        .set({ role: "owner" })
+        .where("organization_id", "=", ORGANIZATION_ID)
+        .where("principal_id", "=", PRINCIPAL_ID)
+        .executeTakeFirstOrThrow();
+      expect(JSON.stringify(await apiTokens.list(ORGANIZATION_ID, PRINCIPAL_ID)))
+        .not.toContain(issuedToken.token);
+      await apiTokens.revoke(ORGANIZATION_ID, PRINCIPAL_ID, issuedToken.tokenId);
+      await expect(apiTokens.authenticate(issuedToken.token)).resolves.toBeNull();
+      await expect(apiTokens.revoke(ORGANIZATION_ID, PRINCIPAL_ID, "not-a-uuid"))
+        .rejects.toMatchObject({ code: "invalid_api_token" });
 
       const jobs = new PostgresJobQueue(database);
       const windowJobId = await jobs.enqueueOnce(
@@ -128,15 +195,106 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
         .where("kind", "=", "test_window")
         .execute();
 
+      const leaseJobId = await jobs.enqueue(
+        ORGANIZATION_ID,
+        "test_lease",
+        "test-lease:1",
+        { fixture: true }
+      );
+      expect(leaseJobId).not.toBeNull();
+      const firstLease = await jobs.lease("lease-owner-1", 1, 10);
+      expect(firstLease).toHaveLength(1);
+      expect(firstLease[0]?.id).toBe(leaseJobId);
+      await expect(jobs.renew(leaseJobId!, "not-the-owner", 10)).resolves.toBe(false);
+      await expect(jobs.renew(leaseJobId!, "lease-owner-1", 10)).resolves.toBe(true);
+      await database.updateTable("scheduled_jobs")
+        .set({ lease_expires_at: new Date(0) })
+        .where("id", "=", leaseJobId!)
+        .executeTakeFirstOrThrow();
+      const recoveredLease = await jobs.lease("lease-owner-2", 1, 10);
+      expect(recoveredLease[0]?.id).toBe(leaseJobId);
+      await expect(jobs.succeed(leaseJobId!, "lease-owner-1"))
+        .rejects.toBeInstanceOf(JobLeaseLostError);
+      await expect(jobs.succeed(leaseJobId!, "lease-owner-2")).resolves.toBeUndefined();
+      await database.deleteFrom("scheduled_jobs")
+        .where("kind", "=", "test_lease")
+        .execute();
+
+      // OAuth callbacks for a first-time Google subject must serialize before
+      // deciding whether the second callback is a role downgrade.
+      const oauthRaceSubject = `oauth-race-${randomUUID()}`;
+      const oauthRaceConnectionId = randomUUID();
+      let signalOAuthInserted: () => void = () => undefined;
+      let releaseFirstOAuth: () => void = () => undefined;
+      const oauthInserted = new Promise<void>((resolve) => {
+        signalOAuthInserted = resolve;
+      });
+      const oauthRelease = new Promise<void>((resolve) => {
+        releaseFirstOAuth = resolve;
+      });
+      const firstOAuth = database.transaction().execute(async (transaction) => {
+        expect(await loadGoogleConnectionForOAuthUpdate(
+          transaction,
+          ORGANIZATION_ID,
+          oauthRaceSubject
+        )).toBeUndefined();
+        await transaction.insertInto("provider_connections").values({
+          id: oauthRaceConnectionId,
+          organization_id: ORGANIZATION_ID,
+          owner_principal_id: PRINCIPAL_ID,
+          provider: "google",
+          remote_subject: oauthRaceSubject,
+          account_label: "oauth-race@example.invalid",
+          display_label: "First OAuth callback",
+          intended_role: "source",
+          email_masked: "o***@example.invalid",
+          credential_envelope: { fixture: true },
+          key_version: "test-v1",
+          scopes: JSON.stringify(["calendar.events.readonly"]),
+          status: "active",
+          last_success_at: null,
+          safe_error_code: null
+        }).executeTakeFirstOrThrow();
+        signalOAuthInserted();
+        await oauthRelease;
+      });
+      await withTimeout(oauthInserted, 5_000, "first OAuth callback did not acquire its identity lock");
+      const secondOAuth = database.transaction().execute(async (transaction) =>
+        loadGoogleConnectionForOAuthUpdate(transaction, ORGANIZATION_ID, oauthRaceSubject)
+      );
+      let secondOAuthSettled = false;
+      void secondOAuth.finally(() => {
+        secondOAuthSettled = true;
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      expect(secondOAuthSettled).toBe(false);
+      releaseFirstOAuth();
+      await firstOAuth;
+      await expect(secondOAuth).resolves.toMatchObject({
+        id: oauthRaceConnectionId,
+        intended_role: "source"
+      });
+      await database.deleteFrom("provider_connections")
+        .where("id", "=", oauthRaceConnectionId)
+        .executeTakeFirstOrThrow();
+
       const sourceConnectionId = randomUUID();
       const destinationConnectionId = randomUUID();
       const sourceToken = fakeAccessTokenForConnection(sourceConnectionId);
       const destinationToken = fakeAccessTokenForConnection(destinationConnectionId);
       const sourceCalendarId = randomUUID();
       const destinationCalendarId = randomUUID();
+      const delegatedConnectionAId = randomUUID();
+      const delegatedConnectionBId = randomUUID();
+      const delegatedCalendarAId = randomUUID();
+      const delegatedCalendarBId = randomUUID();
+      const delegatedRemoteCalendarId = "delegated-personal@group.calendar.google.com";
+      const delegatedTokenB = fakeAccessTokenForConnection(delegatedConnectionBId);
       const staleCrossAccountCalendarId = randomUUID();
       const sourceObservationId = randomUUID();
       const sourceObservation = sourceEventForTomorrow();
+      const workObservationId = randomUUID();
+      const workInvitation = workInvitationFor(sourceObservation);
 
       await database.transaction().execute(async (transaction) => {
         await transaction
@@ -167,11 +325,11 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
               remote_subject: `destination-${destinationConnectionId}`,
               account_label: "destination@example.invalid",
               display_label: "Work destination",
-              intended_role: "destination",
+              intended_role: "both",
               email_masked: "d•••••@example.invalid",
               credential_envelope: { fixture: true },
               key_version: "test-v1",
-              scopes: JSON.stringify(["calendar.write"]),
+              scopes: JSON.stringify(["calendar.read", "calendar.write"]),
               status: "active",
               last_success_at: null,
               safe_error_code: null
@@ -257,6 +415,23 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
             observed_at: new Date()
           })
           .execute();
+        await transaction
+          .insertInto("source_observations")
+          .values({
+            id: workObservationId,
+            organization_id: ORGANIZATION_ID,
+            calendar_endpoint_id: destinationCalendarId,
+            remote_event_id: workInvitation.source_event_ref,
+            recurrence_identity: "",
+            remote_etag: workInvitation.remote_revision,
+            normalized_event: workInvitation,
+            observation_hash: sharedPolicyRuntime.hash(workInvitation),
+            managed_copy: false,
+            tombstone: false,
+            sync_generation: 1,
+            observed_at: new Date()
+          })
+          .execute();
 
         const seededAt = new Date();
         await transaction
@@ -279,6 +454,26 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
             safe_error_code: null
           })
           .execute();
+        await transaction
+          .insertInto("sync_cursors")
+          .values({
+            id: randomUUID(),
+            organization_id: ORGANIZATION_ID,
+            calendar_endpoint_id: destinationCalendarId,
+            query_fingerprint: calendarSyncQueryFingerprint(
+              sharedPolicyRuntime,
+              "fake",
+              "destination-primary"
+            ),
+            sync_token: "work-preview-ready-cursor",
+            generation: 1,
+            state: "ready",
+            last_started_at: seededAt,
+            last_full_sync_at: seededAt,
+            last_success_at: seededAt,
+            safe_error_code: null
+          })
+          .execute();
       });
 
       const connections = await database
@@ -290,11 +485,406 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
       expect(connections.every((connection) => connection.provider === "fake")).toBe(true);
       expect(connections.map((connection) => connection.scopes)).toEqual([
         ["calendar.read"],
-        ["calendar.write"]
+        ["calendar.read", "calendar.write"]
       ]);
+
+      const delegatedScopes = [
+        "openid",
+        "email",
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.freebusy",
+        "https://www.googleapis.com/auth/calendar.events.readonly",
+        "https://www.googleapis.com/auth/calendar.events"
+      ];
+      await database.transaction().execute(async (transaction) => {
+        await transaction.insertInto("provider_connections").values([
+          {
+            id: delegatedConnectionAId,
+            organization_id: ORGANIZATION_ID,
+            owner_principal_id: PRINCIPAL_ID,
+            provider: "google",
+            remote_subject: `delegated-a-${delegatedConnectionAId}`,
+            account_label: "delegate-a@example.invalid",
+            display_label: "Delegated alias A",
+            intended_role: "both",
+            email_masked: "d***@example.invalid",
+            credential_envelope: { fixture: true },
+            key_version: "test-v1",
+            scopes: JSON.stringify(delegatedScopes),
+            status: "active",
+            last_success_at: null,
+            safe_error_code: null
+          },
+          {
+            id: delegatedConnectionBId,
+            organization_id: ORGANIZATION_ID,
+            owner_principal_id: PRINCIPAL_ID,
+            provider: "google",
+            remote_subject: `delegated-b-${delegatedConnectionBId}`,
+            account_label: "delegate-b@example.invalid",
+            display_label: "Delegated alias B",
+            intended_role: "both",
+            email_masked: "d***@example.invalid",
+            credential_envelope: { fixture: true },
+            key_version: "test-v1",
+            scopes: JSON.stringify(delegatedScopes),
+            status: "active",
+            last_success_at: null,
+            safe_error_code: null
+          }
+        ]).execute();
+        await transaction.insertInto("calendar_endpoints").values([
+          {
+            id: delegatedCalendarAId,
+            organization_id: ORGANIZATION_ID,
+            connection_id: delegatedConnectionAId,
+            remote_id: delegatedRemoteCalendarId,
+            name: "Delegated Personal A",
+            timezone: "UTC",
+            access_role: "owner",
+            readable: true,
+            writable: true,
+            primary_calendar: false,
+            capabilities: { freebusy_readable: true }
+          },
+          {
+            id: delegatedCalendarBId,
+            organization_id: ORGANIZATION_ID,
+            connection_id: delegatedConnectionBId,
+            remote_id: delegatedRemoteCalendarId,
+            name: "Delegated Personal B",
+            timezone: "UTC",
+            access_role: "owner",
+            readable: true,
+            writable: true,
+            primary_calendar: false,
+            capabilities: { freebusy_readable: true }
+          }
+        ]).execute();
+        await transaction.insertInto("source_observations").values({
+          id: randomUUID(),
+          organization_id: ORGANIZATION_ID,
+          calendar_endpoint_id: delegatedCalendarAId,
+          remote_event_id: sourceObservation.source_event_ref,
+          recurrence_identity: "",
+          remote_etag: sourceObservation.remote_revision,
+          normalized_event: sourceObservation,
+          observation_hash: sharedPolicyRuntime.hash(sourceObservation),
+          managed_copy: false,
+          tombstone: false,
+          sync_generation: 1,
+          observed_at: new Date()
+        }).executeTakeFirstOrThrow();
+        const seededAt = new Date();
+        await transaction.insertInto("sync_cursors").values({
+          id: randomUUID(),
+          organization_id: ORGANIZATION_ID,
+          calendar_endpoint_id: delegatedCalendarAId,
+          query_fingerprint: calendarSyncQueryFingerprint(
+            sharedPolicyRuntime,
+            "google",
+            delegatedRemoteCalendarId
+          ),
+          sync_token: "delegated-alias-ready-cursor",
+          generation: 1,
+          state: "ready",
+          last_started_at: seededAt,
+          last_full_sync_at: seededAt,
+          last_success_at: seededAt,
+          safe_error_code: null
+        }).executeTakeFirstOrThrow();
+      });
+
+      const fakeProvider = new BlockingCreateFakeCalendarProvider();
+      const providers = new ProviderRouter(fakeProvider, fakeProvider);
+      const tokenBroker = new FakeAccessTokenBroker();
+      const conflictPrivacyHasher = new ConflictPrivacyHasher(Buffer.alloc(32, 17));
+      if (sourceObservation.timing?.kind !== "timed") {
+        throw new Error("integration fixture must be timed");
+      }
+      fakeProvider.setFreeBusy("source-primary", [{
+        start: sourceObservation.timing.start_instant,
+        end: sourceObservation.timing.end_instant
+      }], sourceToken);
+      fakeProvider.setFreeBusy(delegatedRemoteCalendarId, [{
+        start: sourceObservation.timing.start_instant,
+        end: sourceObservation.timing.end_instant
+      }], delegatedTokenB);
+      fakeProvider.setInvitation("destination-primary", workInvitation.source_event_ref, {
+        responseStatus: "needs_action",
+        revision: 1
+      }, destinationToken);
+      const conflictResponses = new ConflictResponseService(
+        database,
+        sharedPolicyRuntime,
+        conflictPrivacyHasher,
+        providers,
+        tokenBroker,
+        { providerWritesEnabled: true, messageDelivery: "simulated" }
+      );
+      await expect(conflictResponses.preview(ORGANIZATION_ID, PRINCIPAL_ID, {
+        name: "Malformed identifiers",
+        response_calendar_id: "work-calendar",
+        availability_calendar_ids: ["personal-calendar"]
+      })).rejects.toMatchObject({ code: "invalid_conflict_response_rule" });
+      await expect(conflictResponses.activate(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        "not-a-uuid"
+      )).rejects.toMatchObject({ code: "invalid_request" });
+      await expect(conflictResponses.setPaused(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        "not-a-uuid",
+        true
+      )).rejects.toMatchObject({ code: "invalid_request" });
+      const conflictPreview = await conflictResponses.preview(ORGANIZATION_ID, PRINCIPAL_ID, {
+        name: "Keep personal availability private",
+        response_calendar_id: destinationCalendarId,
+        availability_calendar_ids: [sourceCalendarId],
+        decline_message: "I have a private conflict. Please choose another time.",
+        horizon_days: 30
+      });
+      expect(conflictPreview).toMatchObject({ invitation_count: 1, conflict_count: 1 });
+      expect(Object.keys(conflictPreview.examples[0] ?? {})).toEqual(["start_at", "end_at"]);
+      const conflictRule = await conflictResponses.activate(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        conflictPreview.preview_token
+      );
+      const duplicateResponsePreview = await conflictResponses.preview(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        {
+          name: "Conflicting controller",
+          response_calendar_id: destinationCalendarId,
+          availability_calendar_ids: [sourceCalendarId],
+          decline_message: "A different message must not race.",
+          horizon_days: 30
+        }
+      );
+      await expect(conflictResponses.activate(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        duplicateResponsePreview.preview_token
+      )).rejects.toMatchObject({ code: "response_rule_conflict" });
+      const conflictCoordinator = new ConflictResponseCoordinator(
+        database,
+        sharedPolicyRuntime,
+        conflictPrivacyHasher,
+        providers,
+        tokenBroker,
+        true
+      );
+      await conflictCoordinator.reconcile(ORGANIZATION_ID, conflictRule.id);
+      const invitationAction = await database.selectFrom("invitation_response_actions")
+        .select(["id", "conflict_basis_hash", "status"])
+        .where("rule_id", "=", conflictRule.id)
+        .executeTakeFirstOrThrow();
+      expect(invitationAction.status).toBe("pending");
+      expect(invitationAction.conflict_basis_hash).toMatch(/^hmac-sha256:[0-9a-f]{64}$/u);
+      await conflictCoordinator.apply(
+        ORGANIZATION_ID,
+        invitationAction.id,
+        invitationAction.conflict_basis_hash
+      );
+      await expect(database.selectFrom("invitation_response_actions")
+        .select("status")
+        .where("id", "=", invitationAction.id)
+        .executeTakeFirstOrThrow()).resolves.toEqual({ status: "applied" });
+      expect(fakeProvider.invitation(
+        "destination-primary",
+        workInvitation.source_event_ref,
+        destinationToken
+      )).toMatchObject({
+        responseStatus: "declined",
+        comment: "I have a private conflict. Please choose another time."
+      });
+      const responseIdentity = await database.selectFrom("conflict_response_rules")
+        .select("response_provider_identity")
+        .where("id", "=", conflictRule.id)
+        .executeTakeFirstOrThrow();
+      expect(await countRecentAppliedDeclines(
+        database,
+        ORGANIZATION_ID,
+        responseIdentity.response_provider_identity,
+        new Date()
+      )).toBe(1);
+      // Reconciliation state is intentionally mutable. Prove that overwriting
+      // it cannot erase the immutable provider-write fact from the 24h budget.
+      await database.updateTable("invitation_response_actions")
+        .set({ status: "pending", last_success_at: null })
+        .where("id", "=", invitationAction.id)
+        .executeTakeFirstOrThrow();
+      expect(await countRecentAppliedDeclines(
+        database,
+        ORGANIZATION_ID,
+        responseIdentity.response_provider_identity,
+        new Date()
+      )).toBe(1);
+      await conflictResponses.remove(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        conflictRule.id
+      );
+      await expect(database.selectFrom("invitation_response_actions")
+        .select(["status", "safe_error_code"])
+        .where("id", "=", invitationAction.id)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        status: "superseded",
+        safe_error_code: "rule_deleted"
+      });
+
+      // The attendee message is best-effort at Google. A verified RSVP must
+      // still be terminal, visible as applied-with-warning, and budgeted.
+      fakeProvider.setInvitation("destination-primary", workInvitation.source_event_ref, {
+        responseStatus: "needs_action",
+        revision: 1
+      }, destinationToken);
+      const droppedCommentPreview = await conflictResponses.preview(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        {
+          name: "Message retention warning",
+          response_calendar_id: destinationCalendarId,
+          availability_calendar_ids: [sourceCalendarId],
+          decline_message: "This message may be dropped by the provider.",
+          horizon_days: 30
+        }
+      );
+      expect(droppedCommentPreview.budget_held_count).toBe(0);
+      const droppedCommentRule = await conflictResponses.activate(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        droppedCommentPreview.preview_token
+      );
+      await conflictCoordinator.reconcile(ORGANIZATION_ID, droppedCommentRule.id);
+      const droppedCommentAction = await database.selectFrom("invitation_response_actions")
+        .select(["id", "conflict_basis_hash"])
+        .where("rule_id", "=", droppedCommentRule.id)
+        .executeTakeFirstOrThrow();
+      fakeProvider.dropNextDeclineComment();
+      await conflictCoordinator.apply(
+        ORGANIZATION_ID,
+        droppedCommentAction.id,
+        droppedCommentAction.conflict_basis_hash
+      );
+      await expect(database.selectFrom("invitation_response_actions")
+        .select(["status", "safe_error_code"])
+        .where("id", "=", droppedCommentAction.id)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        status: "applied",
+        safe_error_code: "decline_comment_not_retained"
+      });
+      expect(await countRecentAppliedDeclines(
+        database,
+        ORGANIZATION_ID,
+        responseIdentity.response_provider_identity,
+        new Date()
+      )).toBe(2);
+      await conflictResponses.remove(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        droppedCommentRule.id
+      );
+
+      // Fill the immutable history to the safety ceiling and prove that a new
+      // rule for the same provider calendar cannot reset the 24-hour budget.
+      await database.insertInto("audit_facts").values(Array.from({ length: 18 }, () => ({
+        id: randomUUID(),
+        organization_id: ORGANIZATION_ID,
+        principal_id: null,
+        actor_kind: "sync" as const,
+        action: "invitation_response.declined",
+        target_type: "invitation_response_action",
+        target_id: droppedCommentAction.id,
+        reason_code: "private_availability_conflict",
+        before_hash: null,
+        after_hash: null,
+        detail: { integration_budget_fixture: true }
+      }))).execute();
+      expect(await countRecentAppliedDeclines(
+        database,
+        ORGANIZATION_ID,
+        responseIdentity.response_provider_identity,
+        new Date()
+      )).toBe(20);
+      const budgetPreview = await conflictResponses.preview(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        {
+          name: "Budget survives retirement",
+          response_calendar_id: destinationCalendarId,
+          availability_calendar_ids: [sourceCalendarId],
+          decline_message: "This must be held.",
+          horizon_days: 30
+        }
+      );
+      expect(budgetPreview).toMatchObject({
+        conflict_count: 1,
+        held_count: 1,
+        budget_held_count: 1
+      });
+      const budgetRule = await conflictResponses.activate(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        budgetPreview.preview_token
+      );
+      await conflictCoordinator.reconcile(ORGANIZATION_ID, budgetRule.id);
+      await expect(database.selectFrom("invitation_response_actions")
+        .select(["status", "safe_error_code"])
+        .where("rule_id", "=", budgetRule.id)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        status: "held",
+        safe_error_code: "automatic_decline_budget_exceeded"
+      });
+      await conflictResponses.remove(ORGANIZATION_ID, PRINCIPAL_ID, budgetRule.id);
+      await database.deleteFrom("scheduled_jobs")
+        .where("kind", "in", ["reconcile_conflict_response_rule", "apply_invitation_response"])
+        .execute();
 
       const draft = inlineHoursDraft(sourceCalendarId, destinationCalendarId);
       const policies = new PolicyService(database, sharedPolicyRuntime);
+      await expect(policies.activate(ORGANIZATION_ID, PRINCIPAL_ID, "not-a-uuid"))
+        .rejects.toMatchObject({ code: "invalid_request" });
+      await expect(policies.preview(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        inlineHoursDraft(delegatedCalendarAId, delegatedCalendarBId)
+      )).rejects.toMatchObject({ code: "same_provider_calendar" });
+
+      const delegatedProtectionPreview = await conflictResponses.preview(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        {
+          name: "Protect delegated personal alias",
+          response_calendar_id: destinationCalendarId,
+          availability_calendar_ids: [delegatedCalendarBId],
+          decline_message: "I have a private conflict.",
+          horizon_days: 30
+        }
+      );
+      const delegatedProtectionRule = await conflictResponses.activate(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        delegatedProtectionPreview.preview_token
+      );
+      await expect(policies.preview(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        inlineHoursDraft(delegatedCalendarAId, destinationCalendarId)
+      )).rejects.toMatchObject({ code: "no_copy_rule_conflict" });
+      await expect(policies.preview(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        inlineHoursDraft(sourceCalendarId, delegatedCalendarAId)
+      )).rejects.toMatchObject({ code: "no_copy_rule_conflict" });
+      await conflictResponses.remove(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        delegatedProtectionRule.id
+      );
+
       const preview = await policies.preview(ORGANIZATION_ID, PRINCIPAL_ID, draft);
       expect(preview.counts).toMatchObject({ create: 1, excluded: 0 });
 
@@ -306,6 +896,172 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
       expect(previewRow.policy_hash).toBe(sharedPolicyRuntime.hash(draft));
       expectCanonicalHash(previewRow.policy_hash);
       expectCanonicalHash(previewRow.source_cursor_fingerprint);
+
+      // A bridge and a no-copy conflict rule are mutually exclusive even when
+      // delegated aliases use different local endpoint IDs. Hold conflict
+      // activation for alias B inside its provider read after it owns the
+      // canonical lock, then prove alias A bridge activation waits and loses.
+      const aliasRacePolicyPreview = await policies.preview(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        inlineHoursDraft(delegatedCalendarAId, destinationCalendarId)
+      );
+      const raceConflictPreview = await conflictResponses.preview(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        {
+          name: "Race-safe personal privacy",
+          response_calendar_id: destinationCalendarId,
+          availability_calendar_ids: [delegatedCalendarBId],
+          decline_message: "I have a private conflict. Please choose another time.",
+          horizon_days: 30
+        }
+      );
+      const freeBusyGate = fakeProvider.blockNextFreeBusy();
+      const inFlightConflictActivation = conflictResponses.activate(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        raceConflictPreview.preview_token
+      );
+      await withTimeout(
+        freeBusyGate.entered,
+        5_000,
+        "conflict activation did not reach its blocked free/busy read"
+      );
+      const inFlightPolicyActivation = policies.activate(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        aliasRacePolicyPreview.preview_token
+      );
+      void inFlightPolicyActivation.catch(() => undefined);
+      let advisoryLockObserved = false;
+      let advisoryLockObservationError: unknown = null;
+      try {
+        advisoryLockObserved = await waitUntil(async () => {
+          const activity = await isolatedPool.query<{ waiting: boolean }>(`
+            select exists (
+              select 1
+              from pg_stat_activity
+              where datname = current_database()
+                and pid <> pg_backend_pid()
+                and application_name = 'planipus-postgres-integration'
+                and wait_event_type = 'Lock'
+                and query ilike '%pg_advisory_xact_lock%'
+            ) as waiting
+          `);
+          return activity.rows[0]?.waiting === true;
+        }, 5_000);
+      } catch (error) {
+        advisoryLockObservationError = error;
+      } finally {
+        freeBusyGate.release();
+      }
+      const raceConflictRule = await inFlightConflictActivation;
+      await expect(inFlightPolicyActivation).rejects.toMatchObject({
+        code: "no_copy_rule_conflict"
+      });
+      if (advisoryLockObservationError) {
+        throw advisoryLockObservationError;
+      }
+      expect(advisoryLockObserved).toBe(true);
+      await conflictResponses.remove(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        raceConflictRule.id
+      );
+      await database.deleteFrom("scheduled_jobs")
+        .where("kind", "=", "reconcile_conflict_response_rule")
+        .execute();
+
+      const delegatedOutboundPolicy = await policies.activate(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        aliasRacePolicyPreview.preview_token
+      );
+      await expect(conflictResponses.preview(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        {
+          name: "Active delegated outbound must block",
+          response_calendar_id: destinationCalendarId,
+          availability_calendar_ids: [delegatedCalendarBId],
+          decline_message: "I have a private conflict.",
+          horizon_days: 30
+        }
+      )).rejects.toMatchObject({ code: "copy_policy_conflict" });
+      await policies.setPaused(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        delegatedOutboundPolicy.id,
+        true
+      );
+      const pausedOutboundPreview = await conflictResponses.preview(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        {
+          name: "Paused delegated outbound warning",
+          response_calendar_id: destinationCalendarId,
+          availability_calendar_ids: [delegatedCalendarBId],
+          decline_message: "I have a private conflict.",
+          horizon_days: 30
+        }
+      );
+      expect(pausedOutboundPreview.warnings).toContain("paused_bridge_existing_copies_remain");
+      const pausedOutboundRule = await conflictResponses.activate(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        pausedOutboundPreview.preview_token
+      );
+      await expect(policies.setPaused(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        delegatedOutboundPolicy.id,
+        false
+      )).rejects.toMatchObject({ code: "no_copy_rule_conflict" });
+      await conflictResponses.remove(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        pausedOutboundRule.id
+      );
+
+      const delegatedInboundPreview = await policies.preview(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        inlineHoursDraft(sourceCalendarId, delegatedCalendarAId)
+      );
+      const delegatedInboundPolicy = await policies.activate(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        delegatedInboundPreview.preview_token
+      );
+      await policies.setPaused(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        delegatedInboundPolicy.id,
+        true
+      );
+      await expect(conflictResponses.preview(
+        ORGANIZATION_ID,
+        PRINCIPAL_ID,
+        {
+          name: "Paused delegated inbound must block",
+          response_calendar_id: destinationCalendarId,
+          availability_calendar_ids: [delegatedCalendarBId],
+          decline_message: "I have a private conflict.",
+          horizon_days: 30
+        }
+      )).rejects.toMatchObject({ code: "availability_copy_feedback" });
+      await database.updateTable("sync_policies")
+        .set({ status: "deleted", updated_at: new Date() })
+        .where("id", "in", [delegatedOutboundPolicy.id, delegatedInboundPolicy.id])
+        .execute();
+      await database.deleteFrom("scheduled_jobs")
+        .where("kind", "in", [
+          "reconcile_policy",
+          "reconcile_conflict_response_rule",
+          "apply_invitation_response"
+        ])
+        .execute();
 
       const activated = await policies.activate(
         ORGANIZATION_ID,
@@ -347,9 +1103,6 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
         attempt_count: 0
       });
 
-      const fakeProvider = new BlockingCreateFakeCalendarProvider();
-      const providers = new ProviderRouter(fakeProvider, fakeProvider);
-      const tokenBroker = new FakeAccessTokenBroker();
       const reconciler = new PolicyReconciler(database, sharedPolicyRuntime);
       const reconciliation = await reconciler.reconcile(ORGANIZATION_ID, activated.id);
       expect(reconciliation.effectsCreated).toBe(1);
@@ -1034,6 +1787,25 @@ function sourceEventForTomorrow(): SourceObservation {
   };
 }
 
+function workInvitationFor(personal: SourceObservation): SourceObservation {
+  if (personal.timing?.kind !== "timed") {
+    throw new TypeError("work invitation fixture requires a timed personal event");
+  }
+  return {
+    source_event_ref: `work-invitation-${randomUUID()}`,
+    source_occurrence_ref: "",
+    remote_revision: "1",
+    lifecycle: "confirmed",
+    origin: "provider_original",
+    timing: { ...personal.timing },
+    availability: "busy",
+    relationship: { role: "attendee", response: "needs_action" },
+    destination_identity_invited: false,
+    content: { summary: "Work invitation" },
+    organizer: "organizer@example.invalid"
+  };
+}
+
 function shiftTimedObservation(
   source: SourceObservation,
   milliseconds: number
@@ -1108,6 +1880,11 @@ function inlineHoursDraft(sourceCalendarId: string, destinationCalendarId: strin
 
 class BlockingCreateFakeCalendarProvider extends FakeCalendarProvider {
   private failUpdate = false;
+  private dropDeclineComment = false;
+  private nextFreeBusyGate: {
+    readonly entered: () => void;
+    readonly released: Promise<void>;
+  } | null = null;
   private nextCreateGate: {
     readonly entered: () => void;
     readonly released: Promise<void>;
@@ -1115,6 +1892,51 @@ class BlockingCreateFakeCalendarProvider extends FakeCalendarProvider {
 
   public failNextUpdate(): void {
     this.failUpdate = true;
+  }
+
+  public dropNextDeclineComment(): void {
+    this.dropDeclineComment = true;
+  }
+
+  public override async declineInvitation(
+    accessToken: string,
+    calendarId: string,
+    eventId: string,
+    request: ProviderDeclineInvitationRequest
+  ): Promise<ProviderDeclineInvitationResult> {
+    const result = await super.declineInvitation(accessToken, calendarId, eventId, request);
+    if (!this.dropDeclineComment) return result;
+    this.dropDeclineComment = false;
+    return { ...result, comment: "", commentRetained: false };
+  }
+
+  public blockNextFreeBusy(): { readonly entered: Promise<void>; readonly release: () => void } {
+    if (this.nextFreeBusyGate) {
+      throw new Error("a fake provider free/busy query is already blocked");
+    }
+    let signalEntered: () => void = () => undefined;
+    let signalReleased: () => void = () => undefined;
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      signalReleased = resolve;
+    });
+    this.nextFreeBusyGate = { entered: signalEntered, released };
+    return { entered, release: signalReleased };
+  }
+
+  public override async queryFreeBusy(
+    accessToken: string,
+    request: ProviderFreeBusyRequest
+  ): Promise<ProviderFreeBusyResult> {
+    const gate = this.nextFreeBusyGate;
+    if (gate) {
+      this.nextFreeBusyGate = null;
+      gate.entered();
+      await gate.released;
+    }
+    return super.queryFreeBusy(accessToken, request);
   }
 
   public blockNextCreate(): { readonly entered: Promise<void>; readonly release: () => void } {

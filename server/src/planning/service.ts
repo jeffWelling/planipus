@@ -6,6 +6,7 @@ import {
 import type { Kysely, Transaction } from "kysely";
 
 import type { DatabaseSchema } from "../database/types.js";
+import { lockProtectedSourceCalendars } from "../calendar-protection-lock.js";
 import { newId } from "../foundation.js";
 import { PostgresJobQueue } from "../jobs/queue.js";
 import type { PolicyRuntime } from "../policy/runtime.js";
@@ -164,6 +165,11 @@ export class PlanningService {
         throw new PlanningInputError("preview_stale", "planning preview has expired or was already used");
       }
       const draft = parsePlanningDraft(preview.draft_document);
+      await lockProtectedSourceCalendars(
+        transaction,
+        organizationId,
+        [draft.target_calendar_id]
+      );
       const prepared = await this.prepare(
         organizationId,
         draft,

@@ -62,7 +62,8 @@ let package = Package(
                 "PlanipusSecrets",
                 "PlanipusSync",
                 "PlanipusDesign",
-            ]
+            ],
+            resources: [.process("Resources")]
         ),
         .testTarget(name: "PlanipusCoreTests", dependencies: ["PlanipusCore"]),
         .testTarget(

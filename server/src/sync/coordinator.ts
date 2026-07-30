@@ -75,16 +75,34 @@ export class CalendarSyncCoordinator {
     const accessToken = await this.tokens.accessToken(organizationId, connection.id);
     const calendars = await provider.listCalendars(accessToken);
     await this.db.transaction().execute(async (transaction) => {
-      for (const calendar of calendars) {
-        // `readable` and `writable` are policy-selection capabilities, not a
-        // verbatim copy of the remote ACL. An account connected only as a
-        // destination must never become eligible as a policy source (and vice
-        // versa), even though Google's broader write scope can also read.
-        const { readable, writable } = policyCapabilitiesForRole(
-          connection.intended_role,
-          calendar.readable,
-          calendar.writable
+      const currentConnection = await transaction.selectFrom("provider_connections")
+        .select(["status", "intended_role"])
+        .where("organization_id", "=", organizationId)
+        .where("id", "=", connection.id)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!currentConnection || currentConnection.status !== "active") {
+        throw new NonRetryableJobError(
+          "connection_unavailable",
+          "provider connection changed during calendar discovery"
         );
+      }
+      for (const calendar of calendars) {
+        // `readable` means event-content readable. Opaque availability is a
+        // separate capability so API/MCP callers cannot mistake free/busy-only
+        // authorization for permission to list personal events.
+        const { readable, writable } = policyCapabilitiesForRole(
+          currentConnection.intended_role,
+          calendar.readable,
+          calendar.writable,
+          calendar.freeBusyReadable ?? calendar.readable
+        );
+        const capabilities = {
+          private_visibility: true,
+          conference_copy: false,
+          color: true,
+          freebusy_readable: calendar.freeBusyReadable ?? calendar.readable
+        };
         const row = await transaction
           .insertInto("calendar_endpoints")
           .values({
@@ -98,11 +116,7 @@ export class CalendarSyncCoordinator {
             readable,
             writable,
             primary_calendar: calendar.primary,
-            capabilities: {
-              private_visibility: true,
-              conference_copy: false,
-              color: true
-            }
+            capabilities
           })
           .onConflict((conflict) =>
             conflict.columns(["connection_id", "remote_id"]).doUpdateSet({
@@ -112,12 +126,13 @@ export class CalendarSyncCoordinator {
               readable,
               writable,
               primary_calendar: calendar.primary,
+              capabilities,
               updated_at: new Date()
             })
           )
           .returning(["id", "readable"])
           .executeTakeFirstOrThrow();
-        if (row.readable) {
+        if (row.readable && roleCanSyncEventContent(currentConnection.intended_role)) {
           await this.jobs.enqueue(
             organizationId,
             "sync_calendar",
@@ -169,48 +184,65 @@ export class CalendarSyncCoordinator {
     // later code/config version can create a new cursor fingerprint while old
     // observations carry a high generation. Starting again at 1 would make
     // those unseen rows impossible to tombstone after the new full scan.
-    const [cursorMaximum, observationMaximum] = await Promise.all([
-      this.db
+    const currentCursor = await this.db.transaction().execute(async (transaction) => {
+      const cursorAuthority = await transaction.selectFrom("provider_connections")
+        .select(["status", "intended_role"])
+        .where("organization_id", "=", organizationId)
+        .where("id", "=", calendar.connection_id)
+        .forUpdate()
+        .executeTakeFirst();
+      if (
+        cursorAuthority?.status !== "active"
+        || !roleCanSyncEventContent(cursorAuthority.intended_role)
+      ) {
+        throw new NonRetryableJobError(
+          "connection_role_changed",
+          "connection no longer authorizes event-content sync"
+        );
+      }
+      const cursorMaximum = await transaction
         .selectFrom("sync_cursors")
         .select((expression) => expression.fn.max<number>("generation").as("maximum"))
         .where("organization_id", "=", organizationId)
         .where("calendar_endpoint_id", "=", calendar.id)
-        .executeTakeFirst(),
-      this.db
+        .executeTakeFirst();
+      const observationMaximum = await transaction
         .selectFrom("source_observations")
         .select((expression) => expression.fn.max<number>("sync_generation").as("maximum"))
         .where("organization_id", "=", organizationId)
         .where("calendar_endpoint_id", "=", calendar.id)
-        .executeTakeFirst()
-    ]);
-    const nextCalendarGeneration = Math.max(
-      Number(cursorMaximum?.maximum ?? 0),
-      Number(observationMaximum?.maximum ?? 0)
-    ) + 1;
-    const cursor = await this.db
-      .insertInto("sync_cursors")
-      .values({
-        id: newId(),
-        organization_id: organizationId,
-        calendar_endpoint_id: calendar.id,
-        query_fingerprint: queryFingerprint,
-        sync_token: null,
-        generation: nextCalendarGeneration,
-        state: "full_required",
-        last_started_at: null,
-        last_full_sync_at: null,
-        last_success_at: null,
-        safe_error_code: null
-      })
-      .onConflict((conflict) => conflict.columns(["calendar_endpoint_id", "query_fingerprint"]).doNothing())
-      .returningAll()
-      .executeTakeFirst();
-    const currentCursor = cursor ?? await this.db
-      .selectFrom("sync_cursors")
-      .selectAll()
-      .where("calendar_endpoint_id", "=", calendar.id)
-      .where("query_fingerprint", "=", queryFingerprint)
-      .executeTakeFirstOrThrow();
+        .executeTakeFirst();
+      const nextCalendarGeneration = Math.max(
+        Number(cursorMaximum?.maximum ?? 0),
+        Number(observationMaximum?.maximum ?? 0)
+      ) + 1;
+      const cursor = await transaction
+        .insertInto("sync_cursors")
+        .values({
+          id: newId(),
+          organization_id: organizationId,
+          calendar_endpoint_id: calendar.id,
+          query_fingerprint: queryFingerprint,
+          sync_token: null,
+          generation: nextCalendarGeneration,
+          state: "full_required",
+          last_started_at: null,
+          last_full_sync_at: null,
+          last_success_at: null,
+          safe_error_code: null
+        })
+        .onConflict((conflict) => conflict
+          .columns(["calendar_endpoint_id", "query_fingerprint"])
+          .doNothing())
+        .returningAll()
+        .executeTakeFirst();
+      return cursor ?? transaction
+        .selectFrom("sync_cursors")
+        .selectAll()
+        .where("calendar_endpoint_id", "=", calendar.id)
+        .where("query_fingerprint", "=", queryFingerprint)
+        .executeTakeFirstOrThrow();
+    });
     if (
       currentCursor.sync_token
       && (
@@ -306,6 +338,21 @@ export class CalendarSyncCoordinator {
     }
 
     await this.db.transaction().execute(async (transaction) => {
+      const finalAuthority = await transaction.selectFrom("provider_connections")
+        .select(["status", "intended_role"])
+        .where("organization_id", "=", organizationId)
+        .where("id", "=", calendar.connection_id)
+        .forUpdate()
+        .executeTakeFirst();
+      if (
+        finalAuthority?.status !== "active"
+        || !roleCanSyncEventContent(finalAuthority.intended_role)
+      ) {
+        throw new NonRetryableJobError(
+          "connection_role_changed",
+          "connection no longer authorizes event-content sync"
+        );
+      }
       if (fullSync) {
         // Only infer absence after every page completed and a final sync token
         // was obtained. An interrupted scan leaves the prior generation intact.
@@ -353,6 +400,13 @@ export class CalendarSyncCoordinator {
         .where("source_calendar_id", "=", calendar.id)
         .where("status", "=", "active")
         .execute();
+      const conflictResponseRules = await transaction
+        .selectFrom("conflict_response_rules")
+        .select(["id", "revision"])
+        .where("organization_id", "=", organizationId)
+        .where("response_calendar_id", "=", calendar.id)
+        .where("status", "=", "active")
+        .execute();
       const cursorWakeup = this.runtime.hash({ token: finalSyncToken, generation: currentCursor.generation });
       for (const policy of policies) {
         await this.jobs.enqueue(
@@ -360,6 +414,16 @@ export class CalendarSyncCoordinator {
           "reconcile_policy",
           `policy:${policy.id}:revision:${policy.revision}:cursor:${cursorWakeup}`,
           { policy_id: policy.id },
+          new Date(),
+          transaction
+        );
+      }
+      for (const rule of conflictResponseRules) {
+        await this.jobs.enqueue(
+          organizationId,
+          "reconcile_conflict_response_rule",
+          `conflict-response-rule:${rule.id}:revision:${rule.revision}:cursor:${cursorWakeup}`,
+          { rule_id: rule.id },
           new Date(),
           transaction
         );
@@ -375,6 +439,29 @@ export class CalendarSyncCoordinator {
     observations: readonly SourceObservation[]
   ): Promise<void> {
     await this.db.transaction().execute(async (transaction) => {
+      const authority = await transaction.selectFrom("calendar_endpoints")
+        .innerJoin(
+          "provider_connections",
+          "provider_connections.id",
+          "calendar_endpoints.connection_id"
+        )
+        .select([
+          "provider_connections.status",
+          "provider_connections.intended_role"
+        ])
+        .where("calendar_endpoints.organization_id", "=", organizationId)
+        .where("calendar_endpoints.id", "=", calendarId)
+        .forUpdate("provider_connections")
+        .executeTakeFirst();
+      if (
+        authority?.status !== "active"
+        || !roleCanSyncEventContent(authority.intended_role)
+      ) {
+        throw new NonRetryableJobError(
+          "connection_role_changed",
+          "connection no longer authorizes event-content sync"
+        );
+      }
       for (const observation of observations) {
         const occurrence = observation.source_occurrence_ref;
         await transaction
@@ -438,14 +525,21 @@ export class CalendarSyncCoordinator {
 }
 
 export function policyCapabilitiesForRole(
-  role: "source" | "destination" | "both",
+  role: "availability" | "source" | "destination" | "both",
   remotelyReadable: boolean,
-  remotelyWritable: boolean
+  remotelyWritable: boolean,
+  _remotelyFreeBusyReadable = remotelyReadable
 ): { readonly readable: boolean; readonly writable: boolean } {
   return {
     readable: remotelyReadable && (role === "source" || role === "both"),
     writable: remotelyWritable && (role === "destination" || role === "both")
   };
+}
+
+export function roleCanSyncEventContent(
+  role: "availability" | "source" | "destination" | "both"
+): boolean {
+  return role === "source" || role === "both";
 }
 
 export class NonRetryableJobError extends Error {

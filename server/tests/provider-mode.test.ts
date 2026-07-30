@@ -5,7 +5,10 @@ import { loadConfig } from "../src/config.js";
 import type { DatabaseSchema } from "../src/database/types.js";
 import { FakeCalendarProvider } from "../src/providers/fake.js";
 import { GoogleCalendarProvider } from "../src/providers/google/calendar.js";
-import { createProviderServices } from "../src/runtime.js";
+import {
+  createProviderServices,
+  invitationDeclineProviderWritesEnabled
+} from "../src/runtime.js";
 
 const FAKE_MODE_WITH_GOOGLE_CREDENTIALS: NodeJS.ProcessEnv = {
   NODE_ENV: "test",
@@ -49,6 +52,21 @@ describe("provider mode boundary", () => {
     await expect(services.tokens.accessToken("organization-1", "connection-1"))
       .rejects.toMatchObject({ code: "provider_disabled", retryable: false });
     expect(fetchGoogle).not.toHaveBeenCalled();
+  });
+
+  it("keeps live Google invitation declines behind their dedicated explicit gate", () => {
+    const fake = loadConfig(FAKE_MODE_WITH_GOOGLE_CREDENTIALS);
+    expect(invitationDeclineProviderWritesEnabled(fake)).toBe(true);
+    expect(invitationDeclineProviderWritesEnabled({
+      ...fake,
+      providerMode: "google",
+      experimentalGoogleInvitationDecline: false
+    })).toBe(false);
+    expect(invitationDeclineProviderWritesEnabled({
+      ...fake,
+      providerMode: "google",
+      experimentalGoogleInvitationDecline: true
+    })).toBe(true);
   });
 });
 

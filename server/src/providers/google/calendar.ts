@@ -7,8 +7,12 @@ import type {
 import type {
   CalendarProvider,
   ProviderCalendar,
+  ProviderDeclineInvitationRequest,
+  ProviderDeclineInvitationResult,
   ProviderEventLookup,
   ProviderEventPage,
+  ProviderFreeBusyRequest,
+  ProviderFreeBusyResult,
   ProviderPlanningEventLookup,
   ProviderWriteResult
 } from "../types.js";
@@ -37,6 +41,26 @@ interface GoogleEventsResponse {
   timeZone?: string;
 }
 
+interface GoogleFreeBusyResponse {
+  timeMin?: string;
+  timeMax?: string;
+  calendars?: Record<string, {
+    busy?: { start?: string; end?: string }[];
+    errors?: { domain?: string; reason?: string }[];
+  }>;
+}
+
+const MAX_FREEBUSY_INTERVALS_PER_CALENDAR = 10_000;
+const MAX_FREEBUSY_INTERVALS_PER_RESPONSE = 50_000;
+
+interface GoogleAttendee {
+  email?: string;
+  self?: boolean;
+  optional?: boolean;
+  responseStatus?: string;
+  comment?: string;
+}
+
 interface GoogleEvent {
   id?: string;
   etag?: string;
@@ -52,7 +76,8 @@ interface GoogleEvent {
   recurringEventId?: string;
   originalStartTime?: { date?: string; dateTime?: string; timeZone?: string };
   organizer?: { email?: string; self?: boolean };
-  attendees?: { email?: string; self?: boolean; responseStatus?: string; comment?: string }[];
+  attendees?: GoogleAttendee[];
+  attendeesOmitted?: boolean;
   extendedProperties?: { private?: Record<string, string> };
 }
 
@@ -77,11 +102,16 @@ export class GoogleCalendarProvider implements CalendarProvider {
           continue;
         }
         const accessRole = item.accessRole ?? "none";
+        const freeBusyReadable = accessRole === "freeBusyReader"
+          || accessRole === "reader"
+          || accessRole === "writer"
+          || accessRole === "owner";
         values.push({
           remoteId: item.id,
           name: item.summary ?? "Calendar",
           timezone: item.timeZone ?? "UTC",
           accessRole,
+          freeBusyReadable,
           readable: accessRole === "reader" || accessRole === "writer" || accessRole === "owner",
           writable: accessRole === "writer" || accessRole === "owner",
           primary: item.primary === true
@@ -90,6 +120,30 @@ export class GoogleCalendarProvider implements CalendarProvider {
       pageToken = response.nextPageToken;
     } while (pageToken);
     return values;
+  }
+
+  public async queryFreeBusy(
+    accessToken: string,
+    request: ProviderFreeBusyRequest
+  ): Promise<ProviderFreeBusyResult> {
+    assertFreeBusyRequest(request);
+    const response = await this.request<GoogleFreeBusyResponse>(
+      new URL(`${API}/freeBusy`),
+      accessToken,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          timeMin: request.timeMin,
+          timeMax: request.timeMax,
+          timeZone: "UTC",
+          calendarExpansionMax: request.calendarIds.length,
+          items: request.calendarIds.map((id) => ({ id }))
+        })
+      },
+      false
+    );
+    return normalizeFreeBusyResponse(request, response);
   }
 
   public async listEvents(
@@ -213,6 +267,92 @@ export class GoogleCalendarProvider implements CalendarProvider {
     }
   }
 
+  public async declineInvitation(
+    accessToken: string,
+    calendarId: string,
+    eventId: string,
+    request: ProviderDeclineInvitationRequest
+  ): Promise<ProviderDeclineInvitationResult> {
+    const current = await this.getInvitationEvent(accessToken, calendarId, eventId);
+    const self = requireRespondableInvitation(current);
+    const revision = requireWriteResult(current).remoteRevision;
+    if (self.responseStatus === "declined") {
+      const observedComment = self.comment ?? "";
+      // A prior Planipus process may have died after Google committed the
+      // PATCH but before local verification. Never repatch a declined RSVP;
+      // conservatively count the pending intent as applied, even if this can
+      // overattribute a manual decline after the crash.
+      return declineResult(
+        current,
+        observedComment,
+        false,
+        observedComment === request.comment
+      );
+    }
+    if (self.responseStatus !== "needsAction") {
+      throw new ProviderError(
+        "invitation_already_answered",
+        "invitation already has an attendee response",
+        false
+      );
+    }
+    if (request.expectedRevision && request.expectedRevision !== revision) {
+      throw new ProviderError(
+        "precondition_failed",
+        "invitation revision changed before the response was applied",
+        false,
+        false,
+        412
+      );
+    }
+
+    const url = invitationUrl(calendarId, eventId);
+    url.searchParams.set("maxAttendees", "1");
+    url.searchParams.set("sendUpdates", "none");
+    const responseBody = {
+      attendeesOmitted: true,
+      attendees: [{
+        email: self.email,
+        responseStatus: "declined",
+        comment: request.comment
+      }]
+    };
+    try {
+      await this.request<GoogleEvent>(url, accessToken, {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          "if-match": revision
+        },
+        body: JSON.stringify(responseBody)
+      }, true);
+    } catch (error) {
+      if (!(error instanceof ProviderError) || !error.ambiguous) throw error;
+      return this.verifyDeclinedInvitation(
+        accessToken,
+        calendarId,
+        eventId,
+        request.comment,
+        error
+      );
+    }
+    // Google does not guarantee that a PATCH response echoes the attendee
+    // fields we changed. Always verify the exact attendee copy before marking
+    // an RSVP applied, even after a syntactically valid 2xx response.
+    return this.verifyDeclinedInvitation(
+      accessToken,
+      calendarId,
+      eventId,
+      request.comment,
+      new ProviderError(
+        "ambiguous_decline_verification",
+        "Google decline response could not be verified",
+        true,
+        true
+      )
+    );
+  }
+
   public async getPlanningEvent(
     accessToken: string,
     calendarId: string,
@@ -226,6 +366,60 @@ export class GoogleCalendarProvider implements CalendarProvider {
       if (error instanceof ProviderError && error.status === 404) return null;
       throw error;
     }
+  }
+
+  private async getInvitationEvent(
+    accessToken: string,
+    calendarId: string,
+    eventId: string
+  ): Promise<GoogleEvent> {
+    const url = invitationUrl(calendarId, eventId);
+    url.searchParams.set("maxAttendees", "1");
+    url.searchParams.set(
+      "fields",
+      "id,etag,status,organizer(self),attendees(email,self,responseStatus,comment),attendeesOmitted"
+    );
+    try {
+      return await this.request<GoogleEvent>(url, accessToken, { method: "GET" }, false);
+    } catch (error) {
+      if (error instanceof ProviderError && error.status === 404) {
+        throw new ProviderError("not_found", "invitation is missing", false, false, 404);
+      }
+      throw error;
+    }
+  }
+
+  private async verifyDeclinedInvitation(
+    accessToken: string,
+    calendarId: string,
+    eventId: string,
+    expectedComment: string,
+    ambiguousError: ProviderError
+  ): Promise<ProviderDeclineInvitationResult> {
+    let observed: GoogleEvent;
+    try {
+      observed = await this.getInvitationEvent(accessToken, calendarId, eventId);
+    } catch {
+      throw ambiguousError;
+    }
+    const self = requireRespondableInvitation(observed);
+    if (self.responseStatus === "declined") {
+      const observedComment = self.comment ?? "";
+      return declineResult(
+        observed,
+        observedComment,
+        true,
+        observedComment === expectedComment
+      );
+    }
+    if (self.responseStatus !== "needsAction") {
+      throw new ProviderError(
+        "invitation_already_answered",
+        "invitation response changed while the decline was being verified",
+        false
+      );
+    }
+    throw ambiguousError;
   }
 
   public async createPlanningEvent(
@@ -311,19 +505,46 @@ export class GoogleCalendarProvider implements CalendarProvider {
             : retryable
               ? "provider_throttled"
               : `provider_http_${status}`;
-      throw new ProviderError(code, `Google Calendar request failed with HTTP ${status}`, retryable, false, status);
+      throw new ProviderError(
+        code,
+        `Google Calendar request failed with HTTP ${status}`,
+        retryable,
+        write && status >= 500,
+        status
+      );
     }
     if (response.status === 204) {
       return undefined as T;
     }
-    const text = await response.text();
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (error) {
+      throw new ProviderError(
+        write ? "ambiguous_response_error" : "provider_network_error",
+        error instanceof Error ? error.message : "Google response could not be read",
+        true,
+        write,
+        response.status
+      );
+    }
     if (text.length > 5_000_000) {
-      throw new ProviderError("response_too_large", "Google Calendar response exceeded the safety limit", false);
+      throw new ProviderError(
+        "response_too_large",
+        "Google Calendar response exceeded the safety limit",
+        write,
+        write
+      );
     }
     try {
       return JSON.parse(text) as T;
     } catch {
-      throw new ProviderError("malformed_response", "Google Calendar returned malformed JSON", false);
+      throw new ProviderError(
+        "malformed_response",
+        "Google Calendar returned malformed JSON",
+        write,
+        write
+      );
     }
   }
 }
@@ -333,6 +554,124 @@ function requireWriteResult(event: GoogleEvent): ProviderWriteResult {
     throw new ProviderError("malformed_response", "Google write result did not contain an ID and revision", false);
   }
   return { remoteEventId: event.id, remoteRevision: event.etag };
+}
+
+function invitationUrl(calendarId: string, eventId: string): URL {
+  return new URL(
+    `${API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`
+  );
+}
+
+function assertFreeBusyRequest(request: ProviderFreeBusyRequest): void {
+  const minimum = Date.parse(request.timeMin);
+  const maximum = Date.parse(request.timeMax);
+  if (
+    request.calendarIds.length < 1
+    || request.calendarIds.length > 50
+    || new Set(request.calendarIds).size !== request.calendarIds.length
+    || request.calendarIds.some((calendarId) => calendarId.length < 1)
+    || !Number.isFinite(minimum)
+    || !Number.isFinite(maximum)
+    || minimum >= maximum
+  ) {
+    throw new ProviderError("invalid_freebusy_request", "free/busy request is invalid", false);
+  }
+}
+
+function normalizeFreeBusyResponse(
+  request: ProviderFreeBusyRequest,
+  response: GoogleFreeBusyResponse
+): ProviderFreeBusyResult {
+  const requestedMinimum = Date.parse(request.timeMin);
+  const requestedMaximum = Date.parse(request.timeMax);
+  const responseMinimum = Date.parse(response.timeMin ?? "");
+  const responseMaximum = Date.parse(response.timeMax ?? "");
+  if (
+    !Number.isFinite(responseMinimum)
+    || !Number.isFinite(responseMaximum)
+    || responseMinimum !== requestedMinimum
+    || responseMaximum !== requestedMaximum
+  ) {
+    throw new ProviderError(
+      "malformed_response",
+      "Google free/busy response covered a different time window",
+      false
+    );
+  }
+  let totalBusyIntervals = 0;
+  const calendars = request.calendarIds.map((calendarId) => {
+    const calendar = response.calendars?.[calendarId];
+    if (!calendar) {
+      throw new ProviderError("malformed_response", "Google free/busy response omitted a calendar", false);
+    }
+    if ((calendar.errors?.length ?? 0) > 0) {
+      throw new ProviderError("freebusy_unavailable", "Google could not calculate calendar availability", true);
+    }
+    const intervalCount = calendar.busy?.length ?? 0;
+    totalBusyIntervals += intervalCount;
+    if (
+      intervalCount > MAX_FREEBUSY_INTERVALS_PER_CALENDAR
+      || totalBusyIntervals > MAX_FREEBUSY_INTERVALS_PER_RESPONSE
+    ) {
+      throw new ProviderError(
+        "freebusy_too_large",
+        "Google returned too many free/busy intervals",
+        false
+      );
+    }
+    const busy = (calendar.busy ?? []).map((interval) => {
+      if (!interval.start || !interval.end) {
+        throw new ProviderError("malformed_response", "Google returned an incomplete busy interval", false);
+      }
+      const start = Date.parse(interval.start);
+      const end = Date.parse(interval.end);
+      if (
+        !Number.isFinite(start)
+        || !Number.isFinite(end)
+        || start >= end
+        || start < requestedMinimum
+        || end > requestedMaximum
+      ) {
+        throw new ProviderError("malformed_response", "Google returned an invalid busy interval", false);
+      }
+      return {
+        start: new Date(start).toISOString(),
+        end: new Date(end).toISOString()
+      };
+    }).sort((left, right) => left.start.localeCompare(right.start) || left.end.localeCompare(right.end));
+    return { calendarId, busy };
+  });
+  return {
+    timeMin: new Date(responseMinimum).toISOString(),
+    timeMax: new Date(responseMaximum).toISOString(),
+    calendars
+  };
+}
+
+function requireRespondableInvitation(event: GoogleEvent): GoogleAttendee & { email: string } {
+  if (event.status === "cancelled") {
+    throw new ProviderError("invitation_cancelled", "invitation is cancelled", false, false, 410);
+  }
+  const self = event.attendees?.find((attendee) => attendee.self === true);
+  if (event.organizer?.self === true || !self?.email) {
+    throw new ProviderError("not_invitation", "event is not an invitation for this identity", false);
+  }
+  return self as GoogleAttendee & { email: string };
+}
+
+function declineResult(
+  event: GoogleEvent,
+  comment: string,
+  changed: boolean,
+  commentRetained = true
+): ProviderDeclineInvitationResult {
+  return {
+    ...requireWriteResult(event),
+    responseStatus: "declined",
+    comment,
+    commentRetained,
+    changed
+  };
 }
 
 function managedIdentity(event: GoogleEvent): ProviderEventLookup["managedIdentity"] {

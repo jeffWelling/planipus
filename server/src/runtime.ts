@@ -1,4 +1,5 @@
 import { SessionService } from "./auth/session.js";
+import { ApiTokenService } from "./auth/api-token.js";
 import type { Kysely } from "kysely";
 import type { SourceObservation } from "@planipus/calendar-sync";
 
@@ -24,11 +25,15 @@ import { CalendarSyncCoordinator } from "./sync/coordinator.js";
 import { EffectExecutor } from "./sync/effects.js";
 import { PlanningCoordinator } from "./planning/coordinator.js";
 import { PlanningService } from "./planning/service.js";
+import { ConflictResponseService } from "./conflict-response/service.js";
+import { ConflictResponseCoordinator } from "./conflict-response/coordinator.js";
+import { ConflictPrivacyHasher } from "./conflict-response/privacy-hash.js";
 
 export interface ServerRuntime {
   readonly config: ServerConfig;
   readonly database: DatabaseHandle;
   readonly sessions: SessionService;
+  readonly apiTokens: ApiTokenService;
   readonly policies: PolicyService;
   readonly googleOAuth?: GoogleOAuthService;
   readonly fakeProvider: FakeCalendarProvider;
@@ -36,6 +41,8 @@ export interface ServerRuntime {
   readonly effects: EffectExecutor;
   readonly planning: PlanningService;
   readonly planningCoordinator: PlanningCoordinator;
+  readonly conflictResponses: ConflictResponseService;
+  readonly conflictResponseCoordinator: ConflictResponseCoordinator;
   close(): Promise<void>;
 }
 
@@ -53,6 +60,11 @@ export interface GoogleServiceFactories {
 
 export function planningProviderWritesEnabled(config: ServerConfig): boolean {
   return config.providerMode === "fake" || config.experimentalGooglePlanning === true;
+}
+
+export function invitationDeclineProviderWritesEnabled(config: ServerConfig): boolean {
+  return config.providerMode === "fake"
+    || config.experimentalGoogleInvitationDecline === true;
 }
 
 const defaultGoogleServiceFactories: GoogleServiceFactories = {
@@ -105,6 +117,7 @@ export async function createRuntime(
     await hydrateFakeProvider(database.db, fakeProvider);
     const providerServices = createProviderServices(config, database.db, fakeProvider);
     const sessions = new SessionService(database.db, config);
+    const apiTokens = new ApiTokenService(database.db);
     const policies = new PolicyService(database.db, sharedPolicyRuntime);
     const coordinator = new CalendarSyncCoordinator(
       database.db,
@@ -118,6 +131,7 @@ export async function createRuntime(
       providerServices.tokens
     );
     const planning = new PlanningService(database.db, sharedPolicyRuntime);
+    const conflictPrivacyHasher = new ConflictPrivacyHasher(config.masterKey);
     const planningCoordinator = new PlanningCoordinator(
       database.db,
       sharedPolicyRuntime,
@@ -125,10 +139,30 @@ export async function createRuntime(
       providerServices.tokens,
       planningProviderWritesEnabled(config)
     );
+    const conflictResponses = new ConflictResponseService(
+      database.db,
+      sharedPolicyRuntime,
+      conflictPrivacyHasher,
+      providerServices.providers,
+      providerServices.tokens,
+      {
+        providerWritesEnabled: invitationDeclineProviderWritesEnabled(config),
+        messageDelivery: config.providerMode === "fake" ? "simulated" : "unverified_google"
+      }
+    );
+    const conflictResponseCoordinator = new ConflictResponseCoordinator(
+      database.db,
+      sharedPolicyRuntime,
+      conflictPrivacyHasher,
+      providerServices.providers,
+      providerServices.tokens,
+      invitationDeclineProviderWritesEnabled(config)
+    );
     return {
       config,
       database,
       sessions,
+      apiTokens,
       policies,
       ...(providerServices.googleOAuth ? { googleOAuth: providerServices.googleOAuth } : {}),
       fakeProvider,
@@ -136,7 +170,10 @@ export async function createRuntime(
       effects,
       planning,
       planningCoordinator,
+      conflictResponses,
+      conflictResponseCoordinator,
       async close(): Promise<void> {
+        conflictPrivacyHasher.destroy();
         config.masterKey.fill(0);
         await database.close();
       }
@@ -185,10 +222,42 @@ async function hydrateFakeProvider(
       .orderBy("remote_event_id", "asc")
       .orderBy("recurrence_identity", "asc")
       .execute();
-    provider.setObservations(
+    const normalized = observations
+      .map((row) => row.normalized_event as unknown as SourceObservation);
+    provider.setObservations(calendar.remote_id, normalized, accessToken);
+    provider.setFreeBusy(
       calendar.remote_id,
-      observations.map((row) => row.normalized_event as unknown as SourceObservation),
+      normalized.flatMap((observation) => fakeBusyInterval(observation)),
       accessToken
     );
+    for (const observation of normalized) {
+      if (
+        observation.relationship.role !== "attendee"
+        || observation.relationship.response === "not_applicable"
+      ) continue;
+      const revision = Number(observation.remote_revision);
+      provider.setInvitation(calendar.remote_id, observation.source_event_ref, {
+        organizerSelf: false,
+        selfAttendeeEmail: "self@example.invalid",
+        cancelled: observation.lifecycle !== "confirmed",
+        responseStatus: observation.relationship.response,
+        comment: observation.relationship.response_note ?? "",
+        revision: Number.isSafeInteger(revision) && revision > 0 ? revision : 1
+      }, accessToken);
+    }
   }
+}
+
+function fakeBusyInterval(
+  observation: SourceObservation
+): readonly { readonly start: string; readonly end: string }[] {
+  if (
+    observation.lifecycle !== "confirmed"
+    || observation.availability === "free"
+    || observation.timing?.kind !== "timed"
+  ) return [];
+  return [{
+    start: observation.timing.start_instant,
+    end: observation.timing.end_instant
+  }];
 }

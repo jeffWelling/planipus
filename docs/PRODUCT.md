@@ -46,11 +46,13 @@ gate. `CALENDAR-SYNC.md` remains authoritative for bridge behavior.
 | Working/Meeting/Personal/Custom Hours | Active common substrate | bridge Hours engine exists; planning rules still embed narrow weekly windows instead of reusable profiles |
 | Availability fences | Active P1 | Server alpha preview/materialization/owned writes; no Mac or live Google evidence |
 | Smart Meetings | Active P1 | Server alpha placement, 24-hour no-move lock, and actionable accept/dismiss suggestions; full recurrence, external-attendee availability, and live-provider proof missing |
+| No-copy conflict response | Active Server alpha | free/busy-only personal availability and guarded work-invitation decline; live Google comment/mail behavior release-gated; absent on Mac |
 | Buffers and travel | Planned parity | research/specification only |
 | Scheduling Links and routing | Planned parity | research/specification only |
 | Habits, Tasks, and Focus | Planned parity | research/specification only |
 | Meeting Quality, overload defense, and team policy | Planned parity | research/specification only |
-| Planner, Insights, Assistant, API/MCP automation | Planned parity | generic Server REST foundation only; no Insights, Assistant, or MCP workflow |
+| API/MCP automation | Active Server alpha | scoped expiring API tokens and API-only stdio MCP read/propose/apply surface; no remote HTTP transport |
+| Planner, Insights, Assistant | Planned parity | no general planner, Insights, or model integration |
 
 “Active” authorizes scoped implementation; it does not mean production-ready.
 “Planned parity” records intended product direction; it does not authorize a
@@ -82,6 +84,14 @@ release claim or imply that every Reclaim behavior will be copied literally.
   suggestions and supports accept/dismiss; accepting a skip queues cancellation
   of the owned occurrence. Full at-click availability/provider-basis
   revalidation and choose-another-time remain incomplete.
+- **Availability-only connection:** strict-private provider grant that can list
+  calendars and query opaque free/busy but cannot read event records or serve as
+  a Calendar Sync source.
+- **Conflict-response rule:** Server-only no-copy rule that uses selected private
+  free/busy to decline an eligible unanswered work invitation with a static
+  comment after exact revalidation.
+- **API token:** one-time-displayed, hashed, expiring Server machine credential
+  scoped to read, propose, or apply.
 
 ## Core journeys
 
@@ -98,6 +108,76 @@ reconcile a route without losing the source event.
 The policy can restrict copies to configured work hours. Ordinary source
 creates/updates/deletes reconcile automatically after activation; a preview is
 used when creating or materially changing the policy.
+
+### Protect work without copying personal events
+
+Connect the personal identity with the recommended `availability` role, connect
+the work response identity as `both`, choose one work calendar and one or more
+private availability calendars, write a calm decline message, and preview. The
+availability-only calendar may appear as “events not readable” while still being
+eligible: API/MCP `readable` means event content, while
+`capabilities.freebusy_readable` is the opaque availability capability. The
+preview says plainly that private replies create **zero new calendar copies**,
+reports eligible and conflicting invitation counts, and shows at most time-only
+examples. If an existing bridge was paused, its surviving copies are reported
+separately rather than hidden by that zero-new-copy statement.
+The safest choice is a dedicated availability-only calendar with no bridge
+history. Selecting it protects it from active Calendar Sync bridges in either
+direction. Existing outbound bridges can be paused first, but their managed
+copies remain and the current alpha has no cleanup flow. An inbound bridge
+blocks protection even when paused because its surviving copies can create
+false personal conflicts. Retiring the private-reply rule later permits bridge
+resume but never cleans old copies or reverses declines.
+Delegated Google connections that expose the same calendar are aliases, not
+separate safety boundaries. Planipus rejects alias self-copy/duplicate selection
+and applies protection across every alias. If an older installation contained an
+alias self-copy bridge, the upgrade stops it and leaves its old copies visible
+for review instead of deleting them silently.
+
+After activation, Planipus responds only to future confirmed timed work
+invitations for which the connected work identity is an attendee still awaiting
+a response. It refreshes personal free/busy and the exact work invitation before
+declining. Organizer, accepted, tentative, declined, cancelled, started,
+all-day, changed, and no-longer-conflicting events are left alone. Pausing stops
+future responses but never auto-accepts or undoes a prior decline.
+If Planipus already has a pending response action and the first exact provider
+check finds the invitation declined, it sends no additional reply. It marks the
+action complete and counts it conservatively because that state could be a
+recovery after an earlier interrupted write or a manual decline; Planipus never
+overwrites an accepted or tentative answer.
+For safety, Planipus holds work beyond 20 automatic declines per response-
+provider identity in a rolling 24-hour window. Immutable verified-decline audit
+facts preserve the count across historical rules, reschedules, and reused action
+rows.
+Fresh work-calendar sync immediately triggers a check; a scheduled 15-minute
+check is the safety fallback.
+
+Converting a previously used source/both account to availability-only may be
+blocked by an event-content feature dependency. Supported planning/private-reply
+rules can be retired, but a bridge or historical projection/action has no safe
+self-service retirement/purge in this alpha. Keep the broader role or use a
+separate dedicated availability-only Google account rather than forcing a
+privacy downgrade.
+Google may retain broader Calendar permission from an older consent even after
+a narrower request. Planipus refuses that callback rather than claim success:
+revoke Planipus's prior grant in the Google account, then reconnect as
+availability-only. The existing role/data remains unchanged until a successful
+guarded callback. Planipus also refuses an availability callback when Google
+does not report the granted scope set; requested permission is not proof of
+actual permission.
+
+This is a **Server alpha** and does not exist on Mac. Google writes are disabled
+by default. Google documents attendee `responseStatus` propagation, not
+guaranteed organizer delivery of the configured comment. Planipus deliberately
+requests `sendUpdates=none` rather than broad `sendUpdates=all` guest updates,
+but actual comment and email/calendar behavior is not release-proven. Preview is
+still available while Google writes are off, but activation is refused; fake
+mode is labeled simulated. Enabling Google RSVP writes never changes the message
+delivery label from unverified without live evidence.
+If Google confirms that your RSVP is declined but drops the configured attendee
+comment, Planipus treats the decline as complete and shows **Comment not retained
+by provider**. It consumes the safety budget and is not repeatedly rewritten;
+this warning must never be presented as successful message delivery.
 
 ### Protect the edge of the day
 
@@ -197,7 +277,10 @@ The current Server alpha exposes:
 - **Bridges:** directed privacy-controlled copies;
 - **Protect:** protected-hours availability fences;
 - **Meet:** Smart Meeting rules and occurrence status; and
-- **Settings:** installation, Hours explanation, security, and diagnostics.
+- **Decline:** no-copy private-availability conflict rules, preview and health;
+  and
+- **Settings:** installation, Hours explanation, security, diagnostics, and
+  one-time API-token/MCP setup.
 
 The current Mac alpha exposes only its native connection, bridge, preview,
 health, and menu-bar flow. Protect and Meet do not silently proxy to Server and
@@ -237,3 +320,10 @@ Future broad-parity information architecture may add:
 11. Fake-provider planning remains available for testing, but real Google
     availability-fence and Smart Meeting writes remain disabled unless the
     operator explicitly enables the experimental planning flag.
+12. No-copy conflict response never stores personal event identity/content or
+    creates a work-calendar placeholder; the strict privacy claim uses an
+    availability-only account.
+13. Automatic decline never overrides organizer/accepted/tentative/declined/
+    cancelled or changed work state, and never auto-accepts on pause/removal.
+14. MCP calls only the Server API. Apply is absent by default and requires both
+    explicit process opt-in and a scoped API token. Mac is unrelated.

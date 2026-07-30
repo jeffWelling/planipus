@@ -137,6 +137,26 @@ private struct OverviewView: View {
     @State private var editingBridge: AppModel.Bridge?
     @State private var isAddingAccount = false
     @State private var isAddingBridge = false
+    @State private var isShowingNotifications = false
+
+    private var mascotState: PipMascotState {
+        if model.mascotIsSyncing { return .syncing }
+        if !model.attentionItems.isEmpty { return .attention }
+        return .idle
+    }
+
+    private var mascotTitle: String {
+        switch mascotState {
+        case .idle:
+            "Everything looks tidy"
+        case .attention:
+            model.attentionItems.count == 1
+                ? "One thing needs attention"
+                : "\(model.attentionItems.count) things need attention"
+        case .syncing:
+            "Comparing calendars…"
+        }
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -148,10 +168,24 @@ private struct OverviewView: View {
             }
             .navigationTitle("Planipus")
             .safeAreaInset(edge: .bottom) {
-                Text("Native Mac edition")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding()
+                VStack(spacing: 6) {
+                    if mascotState == .attention {
+                        Button {
+                            isShowingNotifications = true
+                        } label: {
+                            mascotPanel
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open notification details")
+                    } else {
+                        mascotPanel
+                    }
+                    Text("Native Mac edition")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
             }
         } detail: {
             ScrollView {
@@ -163,6 +197,16 @@ private struct OverviewView: View {
                                 .foregroundStyle(PlanipusPalette.mutedInk)
                         }
                         Spacer()
+                        Button {
+                            model.syncNow()
+                        } label: {
+                            Label(
+                                model.mascotIsSyncing ? "Comparing…" : "Sync now",
+                                systemImage: "arrow.triangle.2.circlepath"
+                            )
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(model.mascotIsSyncing || model.bridges.isEmpty)
                         StatusLozenge(model.lifecycle.rawValue)
                     }
 
@@ -207,6 +251,89 @@ private struct OverviewView: View {
             NewBridgeView()
                 .environmentObject(model)
         }
+        .sheet(isPresented: $isShowingNotifications) {
+            NotificationDetailsView(items: model.attentionItems)
+        }
+        .animation(.easeOut(duration: 0.2), value: mascotState)
+    }
+
+    private var mascotPanel: some View {
+        VStack(spacing: 2) {
+            PipMascotView(state: mascotState, size: 126)
+            Text(mascotTitle)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(mascotState == .attention ? .orange : PlanipusPalette.ink)
+                .multilineTextAlignment(.center)
+            Text(mascotState == .syncing ? model.syncStatusMessage : "Pip is keeping watch.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity)
+        .background(
+            mascotState == .attention ? PlanipusPalette.warmSurface.opacity(0.8) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 14)
+        )
+    }
+}
+
+private struct NotificationDetailsView: View {
+    @Environment(\.dismiss) private var dismiss
+    let items: [AppModel.AttentionItem]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .center, spacing: 18) {
+                PipMascotView(state: items.isEmpty ? .idle : .attention, size: 118)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(items.isEmpty ? "Everything is tidy again" : "Pip noticed something")
+                        .font(.title.bold())
+                    Text(items.isEmpty
+                        ? "There are no current calendar or connection notifications."
+                        : "Enough detail to recover safely, without showing private calendar content.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if !items.isEmpty {
+                Divider()
+                ScrollView {
+                    VStack(spacing: 10) {
+                        ForEach(items) { item in
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: "exclamationmark.circle.fill")
+                                    .foregroundStyle(.orange)
+                                    .font(.title3)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(item.title).font(.headline)
+                                    Text(item.message)
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(12)
+                            .background(
+                                PlanipusPalette.warmSurface,
+                                in: RoundedRectangle(cornerRadius: 12)
+                            )
+                        }
+                    }
+                }
+                .frame(maxHeight: 290)
+            }
+
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(26)
+        .frame(width: 520)
     }
 }
 

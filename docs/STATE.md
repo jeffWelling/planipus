@@ -13,8 +13,9 @@ copy is availability, not a second editable calendar record.
 
 Protected Hours, provider-visible availability fences, and Smart Meetings are
 now active scope, not deferred research. Current implementations of those
-features are Server-only alphas. They do not make the bridge release-ready and
-do not exist in the Mac edition. Tasks, habits, focus, links, buffers, team
+features, plus no-copy conflict response and API/MCP automation, are Server-only
+alphas. They do not make the bridge release-ready and do not exist in the Mac
+edition. Tasks, habits, focus, links, buffers, team
 policy, analytics, and assistants remain later parity modules.
 
 Planipus for Mac and Planipus Server are autonomous editions. They share this
@@ -43,6 +44,10 @@ continuously only while its own Kubernetes workload is healthy.
 - A strict TypeScript/Fastify application with bootstrap authentication,
   HttpOnly sessions, CSRF protection, secure-origin checks, redacted errors,
   protected health/metrics, and an original JSON API.
+- Dedicated Server API tokens with `read|propose|apply` scopes, mandatory bounded
+  expiry, one-time plaintext, digest-only storage, revocation/last-use, active
+  principal/membership checks, actor audit, and browser-cookie/bearer ambiguity
+  rejection. Owner-only Settings can create/list/revoke tokens.
 - PostgreSQL migrations and repositories for users, sessions, encrypted OAuth
   credentials, provider connections, calendars, hours, policies, observations,
   projections, cursors, durable jobs/outbox, previews, and audit activity.
@@ -52,6 +57,16 @@ continuously only while its own Kubernetes workload is healthy.
   role, exact callback handling, account identity/calendar discovery, refresh,
   failed-grant detection that requires reauthorization, and a fake provider for
   credential-free tests. Provider-grant revocation is not yet implemented.
+- Google also supports an `availability` connection intent with CalendarList and
+  `calendar.freebusy`; that scope does not authorize `Events.list`, and role
+  guards prevent bridge-source use/event ingestion. Event sync skips this role.
+  Source/both add free/busy for conflict rules and old grants need
+  reauthorization. An availability callback rejects `oauth_scope_overbroad` if
+  Google retains any wider Calendar grant and `oauth_scope_unverified` if Google
+  omits the returned scope set; the user must revoke the old Google grant and
+  reconnect. Requested scopes are not accepted as availability proof. First-
+  connect and reauthorization callbacks serialize by
+  organization + Google subject before choosing/upserting the connection row.
 - Directed-policy preview and activation, bounded full and incremental reads,
   cursor recovery, occurrence materialization, source reconciliation, durable
   conditional destination effects, ambiguity recovery, retries, pause/resume,
@@ -115,6 +130,75 @@ continuously only while its own Kubernetes workload is healthy.
   connection-scoped, matching the real provider trust boundary. The idempotent
   demo seed restores canonical Personal/Work capabilities and safely removes
   only unreferenced endpoint shapes created by the former cross-account bug.
+- A Server-only no-copy conflict-response rule: strict preview/activation,
+  provider free/busy grouped by account, future confirmed timed unanswered-work-
+  invitation eligibility, time-only preview, work-side durable response actions,
+  exact observation/revision/free-busy/provider revalidation, and conditional
+  self-attendee decline with static comment. Organizer, accepted, tentative,
+  cancelled, missing-self, changed, started, all-day and no-longer-conflicting
+  cases fail closed. A pending action whose initial exact provider GET already
+  sees self declined is conservatively applied without PATCH, consumes budget,
+  and warns if the comment differs. It creates zero calendar
+  placeholders and persists no personal event identity/content in this domain.
+- Every selected private availability calendar is protected from active Calendar
+  Sync bridges as either endpoint; an inbound bridge blocks even while paused.
+  Conflict activation and bridge activation/resume share transaction advisory
+  locks for local endpoints and canonical provider calendars. Google aliases
+  share a global identity, so same-calendar self-copy/duplicate selection and
+  no-copy bypass are blocked across delegated connections. Migration 0014
+  quarantines historical alias self-copy work, audits it, and leaves historical
+  copies for review. An outbound bridge may pause, but managed copies remain/
+  disclosed and resume is blocked while the rule is non-deleted. Rule DELETE
+  supersedes pending/held actions and permits later resume without cleaning old
+  copies or reversing applied declines.
+- Private availability snapshot/action bases use domain-separated HMAC, with no
+  multi-key rotation verification yet. Work sync/candidate scans are fresh and
+  bounded. One durable provider-calendar controller and a 20-declines-per-
+  rolling-24-hours historical budget limit automatic response blast radius. The
+  count comes from immutable verified-decline audit facts, so reschedule/action
+  reuse/retirement cannot erase it.
+- Availability-only endpoints expose event-content `readable=false` and
+  `capabilities.freebusy_readable=true`. Source/both → no-event-read OAuth role
+  changes atomically reject dependencies, or purge observations/cursors and
+  retire subscriptions/sync jobs with audit; sync finalization revalidates the
+  role. Historical projection/action dependencies deliberately block the
+  downgrade because no safe self-service purge exists yet.
+- Successful work response-calendar sync immediately enqueues conflict-rule
+  reconciliation; the scheduled 15-minute pass remains a safety fallback.
+- Google conflict responses use `If-Match`, `attendeesOmitted`, configured
+  comment and `sendUpdates=none`, but live writes are default-off behind
+  `PLANIPUS_EXPERIMENTAL_GOOGLE_INVITATION_DECLINE=false`; comment/mail behavior
+  has not been observed against Google. Google documents `responseStatus`
+  propagation, not guaranteed organizer delivery of the comment; Planipus
+  deliberately avoids broad `sendUpdates=all` guest updates. Preview/list and
+  capabilities expose write/message state; activation/resume fails while Google
+  writes are disabled, and fake-provider behavior is labeled simulated.
+- An initial or post-write exact provider verification may confirm the self RSVP
+  declined while the attendee comment is absent/different. That action remains
+  applied, consumes budget, and surfaces `decline_comment_not_retained` on
+  action/rule health; message delivery remains unverified and the RSVP is not
+  repeatedly rewritten. Google write 5xx/response-read failures are ambiguous
+  and trigger exact GET verification.
+- An optional `@planipus/mcp` stdio process based on the official MCP TypeScript
+  SDK 1.29.0. It calls only the authoritative Server HTTPS/loopback API, exposes
+  static read/propose tools/resources by default, and registers apply tools only
+  with a process opt-in plus API apply scope. No remote Streamable HTTP endpoint,
+  database/provider bypass, or Mac integration exists.
+- MCP uses a 300-second API deadline for bounded availability fan-out. It
+  distinguishes retryable GET `api_timeout` from POST/DELETE
+  `api_timeout_outcome_unknown`, which requires reading state before retry.
+- Authenticated API route classes have process-local actor windows (read
+  600/minute, apply 120/minute, propose 30/10 minutes); conflict preview also
+  refuses a principal with 10 live rows. Safe 429/`Retry-After` reaches MCP.
+  Counters are not shared/persistent and the preview preflight is not yet a
+  concurrency-hard quota, so these are alpha safeguards, not production abuse
+  control.
+- Each worker loop leases at most one scheduled job and one bridge outbox effect.
+  Scheduled jobs heartbeat every lease/3 and perform a final conditional renewal
+  before terminal state; lease loss leaves the current owner authoritative and
+  does not kill the worker. An in-flight provider call cannot be cancelled, so
+  idempotency, ambiguity verification, reconciliation, and provider-I/O-under-
+  lock release evidence remain necessary.
 - Helm solo and standard profiles, separate API/scheduler/worker processes,
   bounded migration retry, CI, source-only Cloud Native Buildpacks output, and
   operational examples. Solo PostgreSQL is loopback-only and initializes a
@@ -137,9 +221,9 @@ continuously only while its own Kubernetes workload is healthy.
   matches the shared reason/privacy/disclosure registries and SHA-256 vector.
 - A native onboarding, policy, preview, health and menu-bar shell that states
   the uptime limitation honestly.
-- No Protected Hours availability-fence or Smart Meeting engine, persistence,
-  provider path, or UI exists on Mac yet. The Mac must not imply otherwise or
-  call Server to obtain those features.
+- No Protected Hours availability-fence, Smart Meeting, no-copy conflict
+  response, API-token, or MCP engine/persistence/provider/UI exists on Mac. The
+  Mac must not imply otherwise or call Server to obtain those features.
 - A production GRDB repository backed by exactly pinned SQLCipher packages,
   five transactional migrations, and a separate random 32-byte database key in
   a non-synchronizing, device-bound Keychain item. It durably stores account and
@@ -170,6 +254,22 @@ flow—login, two fake accounts, hours/privacy preview, activation, Sync Now,
 pause/resume and worker completion—passed against a real local PostgreSQL with
 no browser console errors. Exact procedures and the two database-only defects
 found/fixed are in `docs/evidence/2026-07-21-build-verification.md`.
+
+The final uncommitted API-token/MCP/conflict-response worktree passed the
+consolidated gate on 2026-07-22: documentation/provenance, every TypeScript
+typecheck/build, 96 shared-contract tests, 156 Server tests with one opt-in file
+skipped, 31 MCP tests, 58 Swift tests plus the Swift release build, and Helm
+solo/standard safety lint/render. The separate fresh 0001–0014 PostgreSQL
+integration passed its one test in 11.82 seconds. The compiled local web/API/
+scheduler/worker walkthrough paused the historical demo Bridge, previewed one
+time-only private overlap with zero new copies, activated the rule, and observed
+one simulated decline with the custom comment and no pending or held action.
+Together these prove canonical identity, OAuth scope, conservative decline
+recovery, scheduled-job lease ownership/recovery, fake-provider conflict
+lifecycle, and an alias-aware activation race. They do not prove live Google
+behavior or a seeded historical 0013→0014 upgrade/quarantine. The exact
+planned/verified split is maintained in
+`docs/evidence/2026-07-21-mcp-api-conflict-response.md`.
 
 The planning alpha has credential-free engine, API, validation, migration, and
 provider-serialization tests plus a compiled-browser/PostgreSQL/scheduler/worker
@@ -206,10 +306,14 @@ seed, and browser verification is not a deployment recommendation. CI is
 configured to run the isolated-schema PostgreSQL regression against a
 PostgreSQL 17.7 service, but no hosted CI run exists yet.
 
-The Node install reported one moderate advisory. No critical/high result was
-reported by installation, but a complete release advisory/SBOM review has not
-been performed. Public binaries and images must not be described as reviewed
-until that evidence exists.
+The direct `uuid` package is upgraded to 11.1.1. The current known npm remainder
+is a moderate `@hono/node-server` Windows serve-static advisory transitively
+installed by the MCP SDK. It is unreachable in the supported stdio-only MCP
+process and accepted temporarily pending upstream SDK remediation; adding remote
+HTTP transport reopens it. An attempted current audit during documentation could
+not reach the registry, so complete online advisory/SBOM review remains open.
+Public binaries and images must not be described as reviewed until that evidence
+exists.
 
 The requested Claude Code Opus review is still pending: the installed client is
 logged out, and workspace privacy policy blocked transmitting the full private
@@ -246,12 +350,18 @@ are recorded in `docs/evidence/2026-07-21-claude-opus-review.md`.
    availability plus external-attendee mapping, at-click stale-basis checks,
    choose-another-time, effective priority, recurrence/RSVP semantics,
    invitation update evidence, and safe explicit automatic-move opt-in.
+10. Finish API/MCP/no-copy conflict-response release evidence: real PostgreSQL
+    coordinator/job/restore/privacy inspection, token rotation and MCP-host E2E,
+    availability-role no-event-sync proof, current online audit, and disposable
+    Google comment/mail/recurrence/concurrent-RSVP matrix. Keep Google invitation
+    decline disabled until it passes.
 
 ## Repository and external-state truth
 
-- The implementation is local and uncommitted unless the current Git status
-  says otherwise. Preserve unrelated user changes and review provenance before
-  the first commit.
+- The public baseline is `https://github.com/jeffWelling/planipus` on `main`.
+  This feature work is local on `codex/mcp-auto-decline` and remains uncommitted/
+  unpushed unless current Git state says otherwise. Preserve unrelated user
+  changes and review provenance before commit/push.
 - No production OAuth client, Google account connection, domain, package,
   trademark registration, public image, cluster deployment, signed binary, or
   external contribution has been created by this work.
@@ -259,7 +369,8 @@ are recorded in `docs/evidence/2026-07-21-claude-opus-review.md`.
   is not part of either product edition.
 
 Google-to-Google Calendar Sync is the release-critical active wedge. Server
-Protected Hours, availability fences, and Smart Meetings are also active alpha
-scope. Outlook and CalDAV parity follow. Tasks, habits, focus, booking, buffers,
+Protected Hours, availability fences, Smart Meetings, no-copy conflict response,
+and API/MCP are also active alpha scope. Outlook and CalDAV parity follow.
+Tasks, habits, focus, booking, buffers,
 teams, analytics, and assistants remain future modules and must not dilute the
 sync/recovery/privacy gates.

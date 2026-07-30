@@ -6,6 +6,8 @@ export interface ProviderCalendar {
   readonly name: string;
   readonly timezone: string;
   readonly accessRole: string;
+  /** Provider ACL permits opaque free/busy reads, even if event listing is forbidden. */
+  readonly freeBusyReadable?: boolean;
   readonly readable: boolean;
   readonly writable: boolean;
   readonly primary: boolean;
@@ -20,6 +22,46 @@ export interface ProviderEventPage {
 export interface ProviderWriteResult {
   readonly remoteEventId: string;
   readonly remoteRevision: string;
+}
+
+/** A provider-calculated opaque availability interval. No event identity or
+ * content crosses this boundary. */
+export interface ProviderBusyInterval {
+  readonly start: string;
+  readonly end: string;
+}
+
+export interface ProviderFreeBusyRequest {
+  readonly calendarIds: readonly string[];
+  readonly timeMin: string;
+  readonly timeMax: string;
+}
+
+export interface ProviderFreeBusyCalendar {
+  readonly calendarId: string;
+  readonly busy: readonly ProviderBusyInterval[];
+}
+
+export interface ProviderFreeBusyResult {
+  readonly timeMin: string;
+  readonly timeMax: string;
+  readonly calendars: readonly ProviderFreeBusyCalendar[];
+}
+
+export interface ProviderDeclineInvitationRequest {
+  /** The revision observed by the caller. A mismatch must not be overwritten. */
+  readonly expectedRevision: string | null;
+  /** Exact static attendee response comment. An empty string clears a comment. */
+  readonly comment: string;
+}
+
+export interface ProviderDeclineInvitationResult extends ProviderWriteResult {
+  readonly responseStatus: "declined";
+  readonly comment: string;
+  /** Whether the provider retained the requested attendee response comment. */
+  readonly commentRetained: boolean;
+  /** False when the attendee response already exactly matched the request. */
+  readonly changed: boolean;
 }
 
 export interface ProviderManagedIdentity {
@@ -47,6 +89,10 @@ export interface ProviderPlanningEventLookup extends ProviderWriteResult {
 
 export interface CalendarProvider {
   listCalendars(accessToken: string): Promise<readonly ProviderCalendar[]>;
+  queryFreeBusy(
+    accessToken: string,
+    request: ProviderFreeBusyRequest
+  ): Promise<ProviderFreeBusyResult>;
   listEvents(
     accessToken: string,
     calendarId: string,
@@ -77,6 +123,12 @@ export interface CalendarProvider {
     eventId: string,
     expectedRevision: string | null
   ): Promise<void>;
+  declineInvitation(
+    accessToken: string,
+    calendarId: string,
+    eventId: string,
+    request: ProviderDeclineInvitationRequest
+  ): Promise<ProviderDeclineInvitationResult>;
   getPlanningEvent(
     accessToken: string,
     calendarId: string,

@@ -18,6 +18,9 @@ Expected paths:
 - `2026-07-21-claude-opus-review.md` — review request, authentication/privacy
   blocker, exact continuation procedure, and (once authorized) independent
   read-only review plus prioritized follow-up;
+- `2026-07-21-mcp-api-conflict-response.md` — Server API-token, stdio MCP, and
+  no-copy invitation-response implementation handoff, verification ledger,
+  audit disposition, privacy inspection, and open live-Google release gate;
 - `releases/<version>.md` — tests, migrations, image digest, SBOM, scans,
   benchmarks, provider conformance, backup/restore, known issues;
 - `providers/<provider>-<date>.md` — sanitized fixture/live conformance;

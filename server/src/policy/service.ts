@@ -1,4 +1,4 @@
-import { sql, type Kysely } from "kysely";
+import { sql, type Kysely, type Transaction } from "kysely";
 import type {
   DesiredCopy,
   DestinationCapabilities,
@@ -12,8 +12,13 @@ import type {
 } from "@planipus/calendar-sync";
 
 import type { DatabaseSchema } from "../database/types.js";
-import { newId } from "../foundation.js";
+import { lockProtectedSourceCalendars } from "../calendar-protection-lock.js";
+import { isUuid, newId } from "../foundation.js";
 import { PostgresJobQueue } from "../jobs/queue.js";
+import {
+  providerCalendarIdentity,
+  providerCalendarProtectionKey
+} from "../providers/calendar-identity.js";
 import { calendarSyncQueryFingerprint } from "../sync/query.js";
 import { sourceObservationBasisHash } from "../sync/basis.js";
 import type { PolicyRuntime } from "./runtime.js";
@@ -114,6 +119,7 @@ export class PolicyService {
     principalId: string,
     draft: PolicyDraft
   ): Promise<PreviewSummary> {
+    requirePolicyDraftIds(draft);
     if (draft.source_calendar_id === draft.destination_calendar_id) {
       throw new PolicyInputError("same_calendar", "source and destination calendars must differ");
     }
@@ -131,23 +137,13 @@ export class PolicyService {
     if (hoursMode === "all_times" && (draft.hours_profile_id || inlineHoursProfile)) {
       throw new PolicyInputError("invalid_hours_profile", "all-times mode cannot use an hours profile");
     }
-    const calendars = await this.db
-      .selectFrom("calendar_endpoints")
-      .innerJoin("provider_connections", "provider_connections.id", "calendar_endpoints.connection_id")
-      .select([
-        "calendar_endpoints.id",
-        "calendar_endpoints.remote_id",
-        "calendar_endpoints.readable",
-        "calendar_endpoints.writable",
-        "calendar_endpoints.capabilities",
-        "provider_connections.provider",
-        "provider_connections.intended_role",
-        "provider_connections.status as connection_status"
-      ])
-      .where("calendar_endpoints.organization_id", "=", organizationId)
-      .where("calendar_endpoints.id", "in", [draft.source_calendar_id, draft.destination_calendar_id])
-      .execute();
+    const calendars = await loadPolicyCalendarCapabilities(this.db, organizationId, draft);
     const { source, destination } = requirePolicyCalendars(calendars, draft);
+    await requireNoConflictResponseRule(
+      this.db,
+      organizationId,
+      [providerCalendarIdentity(source), providerCalendarIdentity(destination)]
+    );
     const queryFingerprint = calendarSyncQueryFingerprint(
       this.runtime,
       source.provider,
@@ -297,7 +293,14 @@ export class PolicyService {
     };
   }
 
-  public async activate(organizationId: string, principalId: string, previewId: string): Promise<{ id: string; revision: number }> {
+  public async activate(
+    organizationId: string,
+    principalId: string,
+    previewId: string,
+    actorKind: "user" | "api_token" = "user",
+    actorTokenId: string | null = null
+  ): Promise<{ id: string; revision: number }> {
+    requireLocalPolicyId(previewId, "preview token");
     return this.db.transaction().execute(async (transaction) => {
       const preview = await transaction
         .selectFrom("policy_previews")
@@ -314,24 +317,37 @@ export class PolicyService {
         throw new PolicyInputError("preview_stale", "preview was incomplete and cannot be activated");
       }
       const draft = preview.policy_document as unknown as PolicyDraft;
-      const calendars = await transaction
-        .selectFrom("calendar_endpoints")
-        .innerJoin("provider_connections", "provider_connections.id", "calendar_endpoints.connection_id")
-        .select([
-          "calendar_endpoints.id",
-          "calendar_endpoints.remote_id",
-          "calendar_endpoints.readable",
-          "calendar_endpoints.writable",
-          "calendar_endpoints.capabilities",
-          "provider_connections.provider",
-          "provider_connections.intended_role",
-          "provider_connections.status as connection_status"
-        ])
-        .where("calendar_endpoints.organization_id", "=", organizationId)
-        .where("calendar_endpoints.id", "in", [draft.source_calendar_id, draft.destination_calendar_id])
-        .forUpdate()
-        .execute();
-      const { source } = requirePolicyCalendars(calendars, draft);
+      const initialCalendars = requirePolicyCalendars(
+        await loadPolicyCalendarCapabilities(transaction, organizationId, draft),
+        draft
+      );
+      const sourceProviderIdentity = providerCalendarIdentity(initialCalendars.source);
+      const destinationProviderIdentity = providerCalendarIdentity(initialCalendars.destination);
+      await lockProtectedSourceCalendars(
+        transaction,
+        organizationId,
+        [
+          draft.source_calendar_id,
+          draft.destination_calendar_id,
+          providerCalendarProtectionKey(sourceProviderIdentity),
+          providerCalendarProtectionKey(destinationProviderIdentity)
+        ]
+      );
+      await requireNoConflictResponseRule(
+        transaction,
+        organizationId,
+        [sourceProviderIdentity, destinationProviderIdentity]
+      );
+      const { source, destination } = requirePolicyCalendars(
+        await loadPolicyCalendarCapabilities(transaction, organizationId, draft, true),
+        draft
+      );
+      if (
+        providerCalendarIdentity(source) !== sourceProviderIdentity
+        || providerCalendarIdentity(destination) !== destinationProviderIdentity
+      ) {
+        throw new PolicyInputError("preview_stale", "calendar identity changed after preview");
+      }
       const queryFingerprint = calendarSyncQueryFingerprint(
         this.runtime,
         source.provider,
@@ -378,6 +394,8 @@ export class PolicyService {
           name: draft.name,
           source_calendar_id: draft.source_calendar_id,
           destination_calendar_id: draft.destination_calendar_id,
+          source_provider_identity: sourceProviderIdentity,
+          destination_provider_identity: destinationProviderIdentity,
           hours_profile_id: hoursProfileId,
           status: "active",
           revision: 1,
@@ -398,14 +416,14 @@ export class PolicyService {
           id: newId(),
           organization_id: organizationId,
           principal_id: principalId,
-          actor_kind: "user",
+          actor_kind: actorKind,
           action: "policy.activated",
           target_type: "sync_policy",
           target_id: id,
           reason_code: "preview_confirmed",
           before_hash: null,
           after_hash: persistedPolicyHash,
-          detail: { policy_revision: 1 }
+          detail: auditActorDetail({ policy_revision: 1 }, actorKind, actorTokenId)
         })
         .executeTakeFirstOrThrow();
       await this.jobs.enqueue(organizationId, "reconcile_policy", `policy:${id}:revision:1`, { policy_id: id }, new Date(), transaction);
@@ -423,11 +441,27 @@ export class PolicyService {
       .execute();
   }
 
-  public async setPaused(organizationId: string, principalId: string, id: string, paused: boolean): Promise<void> {
+  public async setPaused(
+    organizationId: string,
+    principalId: string,
+    id: string,
+    paused: boolean,
+    actorKind: "user" | "api_token" = "user",
+    actorTokenId: string | null = null
+  ): Promise<void> {
+    requireLocalPolicyId(id, "sync policy");
     await this.db.transaction().execute(async (transaction) => {
       const policy = await transaction
         .selectFrom("sync_policies")
-        .select(["revision", "policy_hash", "status"])
+        .select([
+          "revision",
+          "policy_hash",
+          "status",
+          "source_calendar_id",
+          "destination_calendar_id",
+          "source_provider_identity",
+          "destination_provider_identity"
+        ])
         .where("organization_id", "=", organizationId)
         .where("id", "=", id)
         .where("status", "!=", "deleted")
@@ -435,6 +469,32 @@ export class PolicyService {
         .executeTakeFirst();
       if (!policy) {
         throw new PolicyInputError("not_found", "sync policy was not found");
+      }
+      if (!paused) {
+        await lockProtectedSourceCalendars(
+          transaction,
+          organizationId,
+          [
+            policy.source_calendar_id,
+            policy.destination_calendar_id,
+            providerCalendarProtectionKey(policy.source_provider_identity),
+            providerCalendarProtectionKey(policy.destination_provider_identity)
+          ]
+        );
+        await requireNoConflictResponseRule(transaction, organizationId, [
+          policy.source_provider_identity,
+          policy.destination_provider_identity
+        ]);
+        const resumed = requirePolicyCalendars(
+          await loadPolicyCalendarCapabilities(transaction, organizationId, policy, true),
+          policy
+        );
+        if (
+          providerCalendarIdentity(resumed.source) !== policy.source_provider_identity
+          || providerCalendarIdentity(resumed.destination) !== policy.destination_provider_identity
+        ) {
+          throw new PolicyInputError("connection_role_changed", "calendar identity changed while the bridge was paused");
+        }
       }
       const nextStatus = paused ? "paused" : "active";
       const changedAt = new Date();
@@ -459,14 +519,18 @@ export class PolicyService {
           id: newId(),
           organization_id: organizationId,
           principal_id: principalId,
-          actor_kind: "user",
+          actor_kind: actorKind,
           action: paused ? "policy.paused" : "policy.resumed",
           target_type: "sync_policy",
           target_id: id,
           reason_code: "user_command",
           before_hash: policy.policy_hash,
           after_hash: policy.policy_hash,
-          detail: { previous_status: policy.status, status: nextStatus }
+          detail: auditActorDetail(
+            { previous_status: policy.status, status: nextStatus },
+            actorKind,
+            actorTokenId
+          )
         })
         .executeTakeFirstOrThrow();
       if (!paused) {
@@ -486,8 +550,11 @@ export class PolicyService {
   public async retryBlocked(
     organizationId: string,
     principalId: string,
-    id: string
+    id: string,
+    actorKind: "user" | "api_token" = "user",
+    actorTokenId: string | null = null
   ): Promise<number> {
+    requireLocalPolicyId(id, "sync policy");
     return this.db.transaction().execute(async (transaction) => {
       const policy = await transaction
         .selectFrom("sync_policies")
@@ -807,37 +874,72 @@ export class PolicyService {
           id: newId(),
           organization_id: organizationId,
           principal_id: principalId,
-          actor_kind: "user",
+          actor_kind: actorKind,
           action: "policy.recovery_requested",
           target_type: "sync_policy",
           target_id: id,
           reason_code: "user_command",
           before_hash: policy.policy_hash,
           after_hash: policy.policy_hash,
-          detail: { effects_retried: retried }
+          detail: auditActorDetail({ effects_retried: retried }, actorKind, actorTokenId)
         })
         .executeTakeFirstOrThrow();
       return retried;
     });
   }
 
-  public async requestReconcile(organizationId: string, id: string): Promise<string | null> {
-    const policy = await this.db
-      .selectFrom("sync_policies")
-      .select(["revision", "status"])
-      .where("organization_id", "=", organizationId)
-      .where("id", "=", id)
-      .executeTakeFirst();
-    if (!policy || policy.status === "deleted") {
-      throw new PolicyInputError("not_found", "sync policy was not found");
-    }
-    return this.jobs.enqueue(
-      organizationId,
-      "reconcile_policy",
-      `policy:${id}:revision:${policy.revision}`,
-      { policy_id: id }
-    );
+  public async requestReconcile(
+    organizationId: string,
+    id: string,
+    principalId: string,
+    actorKind: "user" | "api_token" = "user",
+    actorTokenId: string | null = null
+  ): Promise<string | null> {
+    requireLocalPolicyId(id, "sync policy");
+    return this.db.transaction().execute(async (transaction) => {
+      const policy = await transaction
+        .selectFrom("sync_policies")
+        .select(["revision", "status", "policy_hash"])
+        .where("organization_id", "=", organizationId)
+        .where("id", "=", id)
+        .executeTakeFirst();
+      if (!policy || policy.status === "deleted") {
+        throw new PolicyInputError("not_found", "sync policy was not found");
+      }
+      const job = await this.jobs.enqueue(
+        organizationId,
+        "reconcile_policy",
+        `policy:${id}:revision:${policy.revision}`,
+        { policy_id: id },
+        new Date(),
+        transaction
+      );
+      await transaction.insertInto("audit_facts").values({
+        id: newId(),
+        organization_id: organizationId,
+        principal_id: principalId,
+        actor_kind: actorKind,
+        action: "policy.reconcile_requested",
+        target_type: "sync_policy",
+        target_id: id,
+        reason_code: "user_command",
+        before_hash: policy.policy_hash,
+        after_hash: policy.policy_hash,
+        detail: auditActorDetail({ enqueued: job !== null }, actorKind, actorTokenId)
+      }).executeTakeFirstOrThrow();
+      return job;
+    });
   }
+}
+
+function auditActorDetail(
+  detail: Readonly<Record<string, unknown>>,
+  actorKind: "user" | "api_token",
+  actorTokenId: string | null
+): Readonly<Record<string, unknown>> {
+  return actorKind === "api_token" && actorTokenId
+    ? { ...detail, api_token_id: actorTokenId }
+    : detail;
 }
 
 export class PolicyInputError extends Error {
@@ -847,15 +949,92 @@ export class PolicyInputError extends Error {
   }
 }
 
+function requirePolicyDraftIds(draft: PolicyDraft): void {
+  if (
+    !isUuid(draft.source_calendar_id)
+    || !isUuid(draft.destination_calendar_id)
+    || (draft.hours_profile_id !== undefined
+      && draft.hours_profile_id !== null
+      && !isUuid(draft.hours_profile_id))
+  ) {
+    throw new PolicyInputError("invalid_policy", "policy identifiers are invalid");
+  }
+}
+
+function requireLocalPolicyId(value: string, field: string): void {
+  if (!isUuid(value)) {
+    throw new PolicyInputError("invalid_request", `${field} identifier is invalid`);
+  }
+}
+
 interface PolicyCalendarCapability {
   readonly id: string;
+  readonly connection_id: string;
   readonly remote_id: string;
   readonly readable: boolean;
   readonly writable: boolean;
   readonly capabilities: unknown;
   readonly provider: "google" | "fake";
-  readonly intended_role: "source" | "destination" | "both";
+  readonly intended_role: "availability" | "source" | "destination" | "both";
   readonly connection_status: "active" | "action_required" | "revoked";
+}
+
+async function requireNoConflictResponseRule(
+  executor: Kysely<DatabaseSchema> | Transaction<DatabaseSchema>,
+  organizationId: string,
+  providerIdentities: readonly string[]
+): Promise<void> {
+  const rule = await executor.selectFrom("conflict_response_rules")
+    .innerJoin(
+      "conflict_response_availability_calendars",
+      "conflict_response_availability_calendars.rule_id",
+      "conflict_response_rules.id"
+    )
+    .select("conflict_response_rules.id")
+    .where("conflict_response_rules.organization_id", "=", organizationId)
+    .where("conflict_response_rules.status", "!=", "deleted")
+    .where(
+      "conflict_response_availability_calendars.provider_calendar_identity",
+      "in",
+      providerIdentities
+    )
+    .limit(1)
+    .executeTakeFirst();
+  if (rule) {
+    throw new PolicyInputError(
+      "no_copy_rule_conflict",
+      "a calendar protected for private availability cannot participate in a bridge"
+    );
+  }
+}
+
+async function loadPolicyCalendarCapabilities(
+  executor: Kysely<DatabaseSchema> | Transaction<DatabaseSchema>,
+  organizationId: string,
+  draft: Pick<PolicyDraft, "source_calendar_id" | "destination_calendar_id">,
+  lockRows = false
+): Promise<readonly PolicyCalendarCapability[]> {
+  let query = executor
+    .selectFrom("calendar_endpoints")
+    .innerJoin("provider_connections", "provider_connections.id", "calendar_endpoints.connection_id")
+    .select([
+      "calendar_endpoints.id",
+      "calendar_endpoints.connection_id",
+      "calendar_endpoints.remote_id",
+      "calendar_endpoints.readable",
+      "calendar_endpoints.writable",
+      "calendar_endpoints.capabilities",
+      "provider_connections.provider",
+      "provider_connections.intended_role",
+      "provider_connections.status as connection_status"
+    ])
+    .where("calendar_endpoints.organization_id", "=", organizationId)
+    .where("calendar_endpoints.id", "in", [draft.source_calendar_id, draft.destination_calendar_id]);
+  // Do not lock provider_connections here. OAuth role changes deliberately
+  // take provider-row -> endpoint-advisory order; bridge activation takes the
+  // advisory first and only needs stable endpoint capability rows afterward.
+  if (lockRows) query = query.forUpdate("calendar_endpoints");
+  return query.execute();
 }
 
 function requirePolicyCalendars(
@@ -875,6 +1054,12 @@ function requirePolicyCalendars(
     throw new PolicyInputError(
       "calendar_capability",
       "source and destination must be active and match their authorized connection roles"
+    );
+  }
+  if (providerCalendarIdentity(source) === providerCalendarIdentity(destination)) {
+    throw new PolicyInputError(
+      "same_provider_calendar",
+      "source and destination aliases refer to the same underlying provider calendar"
     );
   }
   return { source, destination };

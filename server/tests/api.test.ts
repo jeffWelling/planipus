@@ -14,6 +14,12 @@ import {
 } from "../src/foundation.js";
 
 const NOW = new Date("2026-07-21T18:00:00.000Z");
+const POLICY_ID = "00000000-0000-7000-8000-000000000301";
+const API_TOKEN_ID = "00000000-0000-7000-8000-000000000302";
+const CONFLICT_PREVIEW_ID = "00000000-0000-7000-8000-000000000303";
+const WORK_CALENDAR_ID = "00000000-0000-7000-8000-000000000304";
+const PERSONAL_CALENDAR_ID = "00000000-0000-7000-8000-000000000305";
+const CONFLICT_RULE_ID = "00000000-0000-7000-8000-000000000306";
 const SESSION = {
   sessionId: "session-id",
   principalId: OWNER_PRINCIPAL_ID,
@@ -99,6 +105,308 @@ describe("Server API", () => {
     expect(fixture.insertedJobs).toHaveLength(0);
   });
 
+  it("accepts scoped bearer tokens without browser CSRF and rejects mixed or excessive access", async () => {
+    const fixture = dependencies();
+    const requestReconcile = vi.fn(async () => "job-api-token");
+    const app = await trackedApp({
+      ...fixture.value,
+      policies: { ...fixture.value.policies, requestReconcile }
+    });
+
+    const read = await app.inject({
+      method: "GET",
+      url: "/api/v1/connections",
+      headers: { authorization: "Bearer read-token" }
+    });
+    expect(read.statusCode).toBe(200);
+
+    const context = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/context",
+      headers: { authorization: "Bearer read-token" }
+    });
+    expect(context.json()).toMatchObject({ actor_kind: "api_token", scopes: ["read"] });
+
+    const excessive = await app.inject({
+      method: "POST",
+      url: `/api/v1/policies/${POLICY_ID}/reconcile`,
+      headers: { authorization: "Bearer read-token" }
+    });
+    expect(excessive.statusCode).toBe(403);
+    expect(excessive.json()).toMatchObject({ code: "insufficient_scope" });
+
+    const apply = await app.inject({
+      method: "POST",
+      url: `/api/v1/policies/${POLICY_ID}/reconcile`,
+      headers: { authorization: "Bearer apply-token" }
+    });
+    expect(apply.statusCode).toBe(202);
+    expect(apply.json()).toEqual({ enqueued: true, job_id: "job-api-token" });
+    expect(requestReconcile).toHaveBeenCalledWith(
+      PERSONAL_ORGANIZATION_ID,
+      POLICY_ID,
+      OWNER_PRINCIPAL_ID,
+      "api_token",
+      "token-apply-token"
+    );
+
+    const mixed = await app.inject({
+      method: "GET",
+      url: "/api/v1/connections",
+      headers: {
+        authorization: "Bearer read-token",
+        cookie: "planipus_session=valid-session"
+      }
+    });
+    expect(mixed.statusCode).toBe(400);
+    expect(mixed.json()).toMatchObject({ code: "ambiguous_credentials" });
+
+    const browserOnly = await app.inject({
+      method: "GET",
+      url: "/api/v1/api-tokens",
+      headers: { authorization: "Bearer apply-token" }
+    });
+    expect(browserOnly.statusCode).toBe(401);
+    expect(browserOnly.json()).toMatchObject({ code: "browser_session_required" });
+  });
+
+  it("creates, lists, and revokes API tokens only through the protected browser session", async () => {
+    const fixture = dependencies();
+    const app = await trackedApp(fixture.value);
+    const csrf = await csrfCredentials(app);
+    const headers = {
+      cookie: csrf.cookie,
+      origin: fixture.value.config.publicUrl.origin,
+      "x-csrf-token": csrf.token
+    };
+
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/api/v1/api-tokens",
+      headers,
+      payload: { label: "Assistant", scopes: ["read"], unexpected: true }
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json()).toMatchObject({ code: "invalid_api_token" });
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/api-tokens",
+      headers,
+      payload: { label: "Assistant", scopes: ["read"], expires_in_days: 30 }
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toEqual({
+      id: API_TOKEN_ID,
+      label: "Assistant",
+      token: "pln_api_secret-once",
+      scopes: ["read"],
+      expires_at: "2026-08-21T18:00:00.000Z"
+    });
+
+    const listed = await app.inject({
+      method: "GET",
+      url: "/api/v1/api-tokens",
+      headers: { cookie: "planipus_session=valid-session" }
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toEqual([]);
+
+    const revoked = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/api-tokens/${API_TOKEN_ID}`,
+      headers
+    });
+    expect(revoked.statusCode).toBe(204);
+  });
+
+  it("enforces propose/apply scopes for no-copy conflict responses and audits token actors", async () => {
+    const fixture = dependencies();
+    const preview = vi.fn(async () => ({
+      preview_token: CONFLICT_PREVIEW_ID,
+      expires_at: "2026-07-21T18:10:00.000Z",
+      invitation_count: 2,
+      conflict_count: 1,
+      held_count: 0,
+      budget_held_count: 0,
+      examples: [{ start_at: "2026-07-22T18:00:00.000Z", end_at: "2026-07-22T19:00:00.000Z" }],
+      warnings: [],
+      provider_writes_enabled: true,
+      message_delivery: "simulated" as const
+    }));
+    const activate = vi.fn(async () => ({ id: "conflict-rule-1" }));
+    const remove = vi.fn(async () => undefined);
+    const app = await trackedApp({
+      ...fixture.value,
+      conflictResponses: {
+        ...fixture.value.conflictResponses!,
+        preview,
+        activate,
+        remove
+      }
+    });
+    const draft = {
+      name: "Keep personal time private",
+      response_calendar_id: WORK_CALENDAR_ID,
+      availability_calendar_ids: [PERSONAL_CALENDAR_ID],
+      decline_message: "I have a private conflict. Please choose another time.",
+      horizon_days: 30
+    };
+
+    const denied = await app.inject({
+      method: "POST",
+      url: "/api/v1/conflict-response/preview",
+      headers: { authorization: "Bearer read-token" },
+      payload: draft
+    });
+    expect(denied.statusCode).toBe(403);
+
+    const proposed = await app.inject({
+      method: "POST",
+      url: "/api/v1/conflict-response/preview",
+      headers: { authorization: "Bearer propose-token" },
+      payload: draft
+    });
+    expect(proposed.statusCode).toBe(200);
+    expect(preview).toHaveBeenCalledWith(PERSONAL_ORGANIZATION_ID, OWNER_PRINCIPAL_ID, draft);
+
+    const applied = await app.inject({
+      method: "POST",
+      url: "/api/v1/conflict-response/rules",
+      headers: { authorization: "Bearer apply-token" },
+      payload: { preview_token: CONFLICT_PREVIEW_ID }
+    });
+    expect(applied.statusCode).toBe(201);
+    expect(activate).toHaveBeenCalledWith(
+      PERSONAL_ORGANIZATION_ID,
+      OWNER_PRINCIPAL_ID,
+      CONFLICT_PREVIEW_ID,
+      expect.any(Date),
+      "api_token",
+      "token-apply-token"
+    );
+
+    const retired = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/conflict-response/rules/${CONFLICT_RULE_ID}`,
+      headers: { authorization: "Bearer apply-token" }
+    });
+    expect(retired.statusCode).toBe(204);
+    expect(remove).toHaveBeenCalledWith(
+      PERSONAL_ORGANIZATION_ID,
+      OWNER_PRINCIPAL_ID,
+      CONFLICT_RULE_ID,
+      expect.any(Date),
+      "api_token",
+      "token-apply-token"
+    );
+  });
+
+  it("rate-limits provider-contacting proposal tokens before excess previews run", async () => {
+    const fixture = dependencies();
+    const preview = vi.fn(async () => ({
+      preview_token: CONFLICT_PREVIEW_ID,
+      expires_at: "2026-07-21T18:10:00.000Z",
+      invitation_count: 0,
+      conflict_count: 0,
+      held_count: 0,
+      budget_held_count: 0,
+      examples: [],
+      warnings: [],
+      provider_writes_enabled: true,
+      message_delivery: "simulated" as const
+    }));
+    const app = await trackedApp({
+      ...fixture.value,
+      conflictResponses: { ...fixture.value.conflictResponses!, preview }
+    });
+    const request = {
+      method: "POST" as const,
+      url: "/api/v1/conflict-response/preview",
+      headers: { authorization: "Bearer propose-token" },
+      payload: {
+        name: "Bounded private previews",
+        response_calendar_id: WORK_CALENDAR_ID,
+        availability_calendar_ids: [PERSONAL_CALENDAR_ID],
+        decline_message: "Please choose another time.",
+        horizon_days: 30
+      }
+    };
+
+    for (let index = 0; index < 30; index += 1) {
+      expect((await app.inject(request)).statusCode).toBe(200);
+    }
+    const limited = await app.inject(request);
+    expect(limited.statusCode).toBe(429);
+    expect(limited.json()).toMatchObject({ code: "api_rate_limited" });
+    expect(Number(limited.headers["retry-after"])).toBeGreaterThan(0);
+    expect(preview).toHaveBeenCalledTimes(30);
+  });
+
+  it("rejects malformed local identifiers before any database-backed service call", async () => {
+    const fixture = dependencies();
+    const preview = vi.fn();
+    const activate = vi.fn();
+    const setPaused = vi.fn();
+    const revoke = vi.fn();
+    const app = await trackedApp({
+      ...fixture.value,
+      apiTokens: { ...fixture.value.apiTokens!, revoke },
+      conflictResponses: {
+        ...fixture.value.conflictResponses!,
+        preview,
+        activate,
+        setPaused
+      }
+    });
+
+    const invalidPreview = await app.inject({
+      method: "POST",
+      url: "/api/v1/conflict-response/preview",
+      headers: { authorization: "Bearer propose-token" },
+      payload: {
+        name: "Invalid identifiers",
+        response_calendar_id: "work-calendar",
+        availability_calendar_ids: ["personal-calendar"],
+        decline_message: "Please choose another time.",
+        horizon_days: 30
+      }
+    });
+    expect(invalidPreview.statusCode).toBe(400);
+    expect(invalidPreview.json()).toMatchObject({ code: "invalid_conflict_response_rule" });
+
+    const invalidActivation = await app.inject({
+      method: "POST",
+      url: "/api/v1/conflict-response/rules",
+      headers: { authorization: "Bearer apply-token" },
+      payload: { preview_token: "not-a-uuid" }
+    });
+    expect(invalidActivation.statusCode).toBe(400);
+
+    const invalidControl = await app.inject({
+      method: "POST",
+      url: "/api/v1/conflict-response/rules/not-a-uuid/pause",
+      headers: { authorization: "Bearer apply-token" }
+    });
+    expect(invalidControl.statusCode).toBe(400);
+
+    const csrf = await csrfCredentials(app);
+    const invalidRevoke = await app.inject({
+      method: "DELETE",
+      url: "/api/v1/api-tokens/not-a-uuid",
+      headers: {
+        cookie: csrf.cookie,
+        origin: fixture.value.config.publicUrl.origin,
+        "x-csrf-token": csrf.token
+      }
+    });
+    expect(invalidRevoke.statusCode).toBe(400);
+    expect(preview).not.toHaveBeenCalled();
+    expect(activate).not.toHaveBeenCalled();
+    expect(setPaused).not.toHaveBeenCalled();
+    expect(revoke).not.toHaveBeenCalled();
+  });
+
   it("returns the web overview DTO and enqueues an explicit sync request", async () => {
     const fixture = dependencies();
     const app = await trackedApp(fixture.value);
@@ -143,6 +451,7 @@ describe("Server API", () => {
       policies: 1,
       calendars: 1,
       planning_rules: 0,
+      conflict_response_rules: 0
     });
     expect(fixture.insertedJobs.map((job) => job["kind"])).toEqual(["sync_calendar", "reconcile_policy"]);
   });
@@ -184,7 +493,7 @@ describe("Server API", () => {
 
     const response = await app.inject({
       method: "POST",
-      url: "/api/v1/policies/policy-1/recover",
+      url: `/api/v1/policies/${POLICY_ID}/recover`,
       headers: {
         cookie: csrf.cookie,
         origin: fixture.value.config.publicUrl.origin,
@@ -197,7 +506,9 @@ describe("Server API", () => {
     expect(retryBlocked).toHaveBeenCalledWith(
       PERSONAL_ORGANIZATION_ID,
       OWNER_PRINCIPAL_ID,
-      "policy-1"
+      POLICY_ID,
+      "user",
+      null
     );
   });
 
@@ -430,6 +741,35 @@ function dependencies(options: FixtureOptions = {}): {
         authenticate: async (token) => token === "valid-session" ? SESSION : null,
         revoke: async () => undefined
       },
+      apiTokens: {
+        authenticate: async (token) => {
+          const scopes = token === "read-token"
+            ? (["read"] as const)
+            : token === "propose-token"
+              ? (["read", "propose"] as const)
+              : token === "apply-token"
+                ? (["read", "propose", "apply"] as const)
+                : null;
+          return scopes ? {
+            tokenId: `token-${token}`,
+            principalId: OWNER_PRINCIPAL_ID,
+            organizationId: PERSONAL_ORGANIZATION_ID,
+            scopes,
+            expiresAt: new Date("2026-08-21T18:00:00.000Z")
+          } : null;
+        },
+        issue: vi.fn(async () => ({
+          tokenId: API_TOKEN_ID,
+          principalId: OWNER_PRINCIPAL_ID,
+          organizationId: PERSONAL_ORGANIZATION_ID,
+          scopes: ["read"] as const,
+          expiresAt: new Date("2026-08-21T18:00:00.000Z"),
+          label: "Assistant",
+          token: "pln_api_secret-once"
+        })),
+        list: vi.fn(async () => []),
+        revoke: vi.fn(async () => undefined)
+      },
       policies: {
         preview: vi.fn(),
         activate: vi.fn(),
@@ -437,6 +777,14 @@ function dependencies(options: FixtureOptions = {}): {
         setPaused: vi.fn(),
         retryBlocked: vi.fn(),
         requestReconcile: vi.fn()
+      },
+      conflictResponses: {
+        preview: vi.fn(),
+        activate: vi.fn(),
+        list: vi.fn(async () => []),
+        setPaused: vi.fn(),
+        requestReconcile: vi.fn(),
+        remove: vi.fn()
       }
     }
   };
@@ -528,6 +876,8 @@ function fixtureDatabase(options: FixtureOptions = {}): {
             : []
           : [{ count: 2 }];
         case "scheduled_jobs": return [{ count: 0 }];
+        case "invitation_response_actions": return [{ count: 0 }];
+        case "conflict_response_rules": return [];
         case "audit_facts": return [{
           id: "audit-1",
           action: "policy.activated",

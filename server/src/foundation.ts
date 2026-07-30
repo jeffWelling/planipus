@@ -1,11 +1,15 @@
 import { createHash, randomBytes } from "node:crypto";
-import { v7 as uuidv7 } from "uuid";
+import { validate as validateUuid, v7 as uuidv7 } from "uuid";
 
 export const PERSONAL_ORGANIZATION_ID = "00000000-0000-7000-8000-000000000001";
 export const OWNER_PRINCIPAL_ID = "00000000-0000-7000-8000-000000000002";
 
 export function newId(): string {
   return uuidv7();
+}
+
+export function isUuid(value: unknown): value is string {
+  return typeof value === "string" && validateUuid(value);
 }
 
 export function randomToken(bytes = 32): string {

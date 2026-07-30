@@ -186,6 +186,20 @@ Fields: grantor, grantee, scope, allowed actions, calendar/item filters, starts,
 expires, approval requirement, revoked_at. Delegation checks at command execution
 and apply time; preview alone does not confer apply authority.
 
+### api_token (implemented Server migration 0006)
+
+Fields: `id`, organization, issuing principal, human label, SHA-256 token digest,
+normalized JSON scopes (`read|propose|apply`), mandatory expiry, last-use,
+revocation, and creation timestamps. Plaintext is returned once and never stored.
+Apply implies propose/read; propose implies read. Authentication also requires an
+active principal and organization membership. Creation/revocation are audited;
+machine-authenticated domain actions use actor kind `api_token` where the service
+records the initiating actor.
+
+Token identifiers are not credentials. Backup/restore may preserve token rows,
+but an operator who cannot account for every external plaintext copy revokes and
+reissues after restore.
+
 ## Calendars and provider mirror
 
 ### provider_connection
@@ -196,12 +210,48 @@ status, error code, connected/revoked times. Credential envelopes contain
 algorithm, key ID/version, nonce, ciphertext, and authentication tag. Never return
 them from general APIs or exports.
 
+Server migration `0008_availability_connection_role.sql` extends the implemented
+Google intent role to `availability|source|destination|both` without changing
+historical rows.
+`availability` is the strict-private free/busy role: it can discover calendars
+and query availability but cannot list events and is excluded from event-sync
+jobs. `source` and `both` may populate `source_observation` for bridge behavior;
+selecting one of those calendars for conflict response does not erase that
+independent persistence boundary.
+
+For role `availability`, the callback validates the **returned** Google grant,
+not merely Planipus's requested scopes. Any retained broader Calendar scope
+fails `oauth_scope_overbroad`; the user must revoke the prior Google grant and
+reconnect. An omitted returned scope set fails `oauth_scope_unverified` for
+availability; Planipus does not substitute its request as proof. A failed
+callback does not alter the existing connection role or
+purge event state. The subject advisory lock is acquired even for first-connect
+callbacks before the authoritative connection ID/row is chosen.
+
+Removing event-read access from an existing source/both Google connection is a
+transactional data migration. A subject-scoped advisory lock plus connection row
+lock serializes first-connect/reauthorization, then the shared per-calendar
+advisory locks serialize feature mutation. Live bridge/planning/response-rule dependencies or
+historical projection/action references reject with
+`availability_role_change_blocked`. Otherwise the transaction deletes that
+connection's source observations/cursors, retires subscriptions and pending/
+retry sync jobs, restricts endpoints, and audits counts before committing the
+new role. Sync page/finalization writes lock and revalidate the connection to
+prevent an in-flight read from repopulating purged content; discovery and cursor
+initialization are guarded as well.
+
 ### calendar_endpoint
 
 Fields: connection, remote ID/href, name, color, timezone, readable, writable,
 primary, capabilities, disabled, sync state, last success/error. Privacy and
 event selection do **not** live here; one calendar can use different rules for
 different destination policies.
+
+`readable` strictly means event-content readable. Opaque provider availability
+is represented independently as `capabilities.freebusy_readable`. Thus an
+availability-only endpoint persists `readable = false` and
+`freebusy_readable = true`; API/MCP clients must not infer event-read authority
+from the latter.
 
 ### source_observation
 
@@ -242,6 +292,24 @@ review-required state, hours profile, hours match mode, privacy preset/version,
 explicit field transform, all-day/free/RSVP/already-invited/override rules,
 generic title/category, visibility, transparency, color, horizon, conflict and
 destination-edit behavior, revision, health/lag/error, created/updated.
+
+Migration 0014 persists length-prefixed `source_provider_identity` and
+`destination_provider_identity`. Google identities use provider + global scope +
+remote calendar ID so delegated aliases converge on one resource; other
+providers use provider + local connection + remote ID. New preview/activation
+rejects equal canonical identities as `same_provider_calendar`, persists both
+identities, and uses them for alias-aware locking/no-copy checks.
+
+During upgrade, a pre-existing Google alias self-copy policy is quarantined
+rather than activated: status becomes `deleted` with
+`same_provider_calendar`, its pending/leased/retry outbox effects become `dead`,
+and matching pending/leased/retry reconcile jobs become `succeeded` with that
+safe code. Deterministic audit action
+`policy.quarantined_same_provider_calendar` records
+`historical_copies_untouched:true`. Historical destination copies remain for
+explicit operator review.
+The database check rejects equal canonical identities for every non-deleted
+policy while preserving those quarantined historical rows.
 
 One policy is directed. Reciprocal behavior uses two records. A policy never
 grants account access; the actor must hold read access to source and write access
@@ -438,6 +506,158 @@ deletion/export is not implemented. Rule removal does enqueue planning-specific
 remote cleanup and leaves past provider events, but has no impact preview,
 detach option, per-event result surface, stuck-cleanup recovery, or local-row
 purge.
+
+## Implemented no-copy conflict-response model (Server migrations 0007–0014)
+
+These aggregates are separate from calendar-bridge projections and planning
+events. They never own or create a personal-calendar event. Personal provider
+availability enters through free/busy as time intervals and is reduced to
+domain-separated keyed snapshot/basis HMACs; no personal event ID or content
+belongs in this model.
+
+### conflict_response_preview
+
+`conflict_response_previews` stores organization/principal, validated canonical
+draft JSON and ordinary configuration hash, provider-derived keyed input HMAC, privacy-safe result,
+fixed reference instant, ten-minute expiry, consumption time, and creation time.
+The result contains only invitation/conflict/held counts, time-only examples,
+and fixed warnings. Activation locks the preview, verifies owner/expiry/one-use,
+reparses and rehashes the draft, recomputes the snapshot, rejects a mismatch or
+already-started conflict, and consumes it in the rule-creation transaction.
+
+### conflict_response_rule and availability calendars
+
+`conflict_response_rules` stores organization/owner, name, response calendar,
+durable `response_provider_identity`, `active|paused|deleted`, positive revision,
+canonical rule JSON/hash, evaluation/success times, safe error, and timestamps.
+The rule JSON contains name, work response calendar endpoint, selected
+availability endpoint IDs, static decline comment, and 1–90-day horizon.
+
+Migration 0009 adds a partial unique index on organization + local response
+calendar for `status <> 'deleted'`. Migration 0012 adds the stronger partial
+unique index on organization + underlying `response_provider_identity`. Google
+calendar IDs are global for this purpose, so two delegated connections that
+point at the same Google calendar cannot become separate controllers or reset a
+safety budget. Non-Google/fake identities include the connection identity.
+Service activation locks `response-provider:<identity>`, checks the same
+invariant, and maps concurrent uniqueness loss to `response_rule_conflict`.
+
+`conflict_response_availability_calendars` is a tenant-consistent join from the
+rule to selected local calendar endpoint IDs and the canonical underlying
+`provider_calendar_identity`. The latter is calendar identity, not event
+identity; it stores no provider event ID.
+Validation requires a distinct readable/writable `both` response calendar and
+one through 32 free/busy-readable availability endpoints. The persisted/API
+`readable` bit strictly means event-content access; an availability-only endpoint
+therefore has `readable = false` and
+`capabilities.freebusy_readable = true`. A strict-private endpoint is owned by
+an `availability` connection; source/both remain valid when another feature
+already needs broader access.
+
+The database cannot encode a conventional cross-table exclusion constraint
+between rules and bridges. Application preview, activation, reconcile/apply and
+policy preview/activation/resume therefore enforce that a calendar selected by
+a non-deleted conflict rule as private availability cannot participate in an
+active bridge as source or destination. Conflict setup rejects an active
+outbound bridge with `copy_policy_conflict`. It rejects any active **or paused**
+inbound bridge with `availability_copy_feedback`, because already-created
+inbound copies can contaminate private free/busy and create self-conflicts.
+Bridge setup/resume uses `no_copy_rule_conflict` for either endpoint.
+
+To make the activation check atomic across the two tables and delegated aliases,
+conflict activation locks every selected local availability endpoint and
+canonical provider-calendar identity; bridge activation and resume lock both
+local endpoints and their persisted canonical source/destination identities
+through the same tenant-scoped PostgreSQL transaction advisory key. Keys are
+sorted and de-duplicated before acquisition. Each path then checks the opposite
+table by canonical identity and inserts/changes status while the lock remains
+held, so concurrent alias requests cannot both commit an active configuration.
+
+Pausing an active **outbound** bridge permits later conflict-rule activation. Pausing does
+not remove that bridge's projections, effects, or already-created managed
+destination copies, so the preview hashes and warns when paused outbound copies
+remain. A non-deleted conflict rule then prevents bridge resume, including while
+the conflict rule is paused. `DELETE /api/v1/conflict-response/rules/:id`
+idempotently marks it deleted and supersedes pending/held actions, after which a
+bridge may resume. Applied RSVP history and older bridge copies are never
+silently reversed or cleaned. Restore/invariant checks must still inspect the
+condition because advisory locks serialize writes but do not repair imported or
+manually corrupted data.
+
+### invitation_response_action
+
+`invitation_response_actions` is durable work-side RSVP intent. Fields include
+organization/rule/revision, response calendar, exact **work** observation/event/
+recurrence identity, work observation hash and keyed conflict-basis HMAC, expected work
+revision, desired static comment, `pending|applied|superseded|held`, resulting
+work revision, attempt/success times, safe error, and timestamps. One action per
+rule/work observation prevents duplicate response intents.
+
+The work identity is necessary to conditionally target an invitation; it must
+not be confused with personal availability identity. Missing revision, changed
+work observation, rule change/pause, disappeared conflict, non-`needs_action`
+provider state, disabled live-write gate, provider precondition, capability loss,
+or the 20-declines-per-rolling-24-hours budget for the underlying response-
+provider identity holds/supersedes rather than authorizing a blind write.
+Historical rules sharing that identity count, so retirement/recreation and a
+delegated Google alias do not reset the budget. An applied action
+is historical truth; pause/delete never converts it into an acceptance.
+If post-write verification proves the RSVP declined but the attendee comment was
+not retained, the action remains `applied` with safe error
+`decline_comment_not_retained`; the rule repeats that warning. A confirmed RSVP
+is not retried merely to chase comment persistence.
+
+The same terminal representation is used for conservative recovery when the
+initial exact provider GET for an existing pending action already finds self
+RSVP `declined`: no PATCH is sent, `changed=false`, exact comment equality
+determines `comment_retained`, and the action is `applied`. This may attribute a
+manual decline to the pending Planipus action, but preserves the safer facts:
+the attendee is declined, Planipus does not overwrite the response, and the
+result consumes rather than bypasses the 20/24-hour budget. Accepted/tentative
+remain held. Ambiguous Google write 5xx/response-read failures use exact GET
+verification before selecting this outcome.
+
+Each verified decline appends an immutable audit fact with action
+`invitation_response.declined`, target type/action ID, ordinary work-side hashes,
+and privacy-safe detail including whether the provider changed and retained the
+comment. The 24-hour budget counts these audit facts—joined through action/rule
+to `response_provider_identity`—rather than mutable action status/success time.
+Rescheduling can reuse/supersede an action row without erasing an earlier decline
+from the budget. `created_at` is explicitly PostgreSQL `clock_timestamp()` at
+verified provider completion, not transaction-start `now()`.
+
+Migration 0010 adds a partial expression index for confirmed, provider-original,
+timed, unanswered work-attendee observations; the query is horizon-bounded and
+fails over 5,000 candidates. Migration 0011 widens the two private hash columns
+to accept `hmac-sha256:`. New snapshot/action bases use a key derived in a
+separate domain from the installation master key, resisting offline enumeration
+of low-entropy busy times from a database or backup alone. Legacy `sha256:` is
+accepted only for pre-release migration compatibility.
+
+Migration 0012 stores the length-prefixed provider identity, backfills existing
+rules, and adds the underlying-provider partial unique index. The migration 0009
+local-endpoint index remains defense in depth. The identity also joins immutable
+historical decline audit facts through their action/rule for the rolling safety
+budget.
+
+Migration 0013 adds a partial audit index on
+`(organization_id, created_at, target_id)` for decline/action facts so the
+rolling immutable-budget lookup is bounded to the relevant fact class.
+
+Migration 0014 stores canonical identities on sync policy source/destination and
+each protected availability selection. It uniquely prevents one rule from
+selecting two aliases of one availability calendar, indexes tenant/provider
+identity lookups, and makes no-copy checks and advisory locks alias-aware.
+
+### Conflict-response retention and restore boundary
+
+Expired previews require a bounded purge policy. Rules/actions remain audit and
+idempotency state until an explicit retention/export design is implemented.
+Database backups contain the configured static comment and work-side invitation
+identifiers/revisions, but must not contain personal event identity/content from
+this feature. After restore, keep Google invitation writes disabled, rotate any
+unaccounted API token, reconcile active rules, and verify current work RSVP and
+fresh free/busy before re-enabling provider writes.
 
 ## Deferred full work and planning model
 
@@ -638,3 +858,7 @@ views require minimum group size and suppress individual productivity rankings.
 5. Migrations are idempotence-tested from every supported release.
 6. Provider tokens are never decrypted during ordinary schema migration unless a
    key-rotation migration explicitly requires it and is restart-safe.
+7. API-token migrations never persist plaintext or make an expired/revoked token
+   active; restore does not manufacture a recoverable credential.
+8. Conflict-response migrations and backfills never materialize personal event
+   identity/content. Availability-only connections remain outside event sync.

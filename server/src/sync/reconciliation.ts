@@ -89,6 +89,12 @@ export class PolicyReconciler {
   public async reconcile(organizationId: string, policyId: string): Promise<ReconciliationSummary> {
     const policy = await this.db
       .selectFrom("sync_policies")
+      .innerJoin("calendar_endpoints as source", "source.id", "sync_policies.source_calendar_id")
+      .innerJoin(
+        "provider_connections as source_connection",
+        "source_connection.id",
+        "source.connection_id"
+      )
       .innerJoin("calendar_endpoints as destination", "destination.id", "sync_policies.destination_calendar_id")
       .innerJoin(
         "provider_connections as destination_connection",
@@ -103,8 +109,13 @@ export class PolicyReconciler {
         "sync_policies.source_calendar_id",
         "sync_policies.destination_calendar_id",
         "sync_policies.hours_profile_id",
+        "source.readable as source_readable",
+        "source_connection.status as source_connection_status",
+        "source_connection.intended_role as source_connection_role",
         "destination.writable as destination_writable",
         "destination.capabilities as destination_capabilities",
+        "destination_connection.status as destination_connection_status",
+        "destination_connection.intended_role as destination_connection_role",
         "destination_connection.account_label as destination_identity"
       ])
       .where("sync_policies.organization_id", "=", organizationId)
@@ -116,6 +127,33 @@ export class PolicyReconciler {
     // Pausing freezes existing copies. A resume explicitly schedules a new pass.
     if (policy.status === "paused") {
       return { policyId, evaluated: 0, effectsCreated: 0, counts: { paused: 1 } };
+    }
+    if (
+      !policy.source_readable
+      || policy.source_connection_status !== "active"
+      || (
+        policy.source_connection_role !== "source"
+        && policy.source_connection_role !== "both"
+      )
+      || !policy.destination_writable
+      || policy.destination_connection_status !== "active"
+      || (
+        policy.destination_connection_role !== "destination"
+        && policy.destination_connection_role !== "both"
+      )
+    ) {
+      await this.db.updateTable("sync_policies")
+        .set({ safe_error_code: "connection_role_changed", updated_at: new Date() })
+        .where("organization_id", "=", organizationId)
+        .where("id", "=", policyId)
+        .where("status", "=", "active")
+        .execute();
+      return {
+        policyId,
+        evaluated: 0,
+        effectsCreated: 0,
+        counts: { connection_role_changed: 1 }
+      };
     }
 
     const draft = policy.policy_document as unknown as PolicyDraft;

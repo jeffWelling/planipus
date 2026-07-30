@@ -11,6 +11,13 @@ export interface LeasedJob {
   readonly attemptCount: number;
 }
 
+export class JobLeaseLostError extends Error {
+  public constructor(public readonly jobId: string) {
+    super(`job lease was lost before transition: ${jobId}`);
+    this.name = "JobLeaseLostError";
+  }
+}
+
 type DbExecutor = Kysely<DatabaseSchema> | Transaction<DatabaseSchema>;
 
 export class PostgresJobQueue {
@@ -137,6 +144,24 @@ export class PostgresJobQueue {
     });
   }
 
+  /** Extend a lease only while this worker still owns it. A false result is a
+   * definitive ownership loss; callers must not attempt a terminal transition
+   * or assume that another worker has not begun recovery. */
+  public async renew(id: string, owner: string, leaseSeconds: number): Promise<boolean> {
+    const now = new Date();
+    const result = await this.db
+      .updateTable("scheduled_jobs")
+      .set({
+        lease_expires_at: new Date(now.getTime() + leaseSeconds * 1_000),
+        updated_at: now
+      })
+      .where("id", "=", id)
+      .where("state", "=", "leased")
+      .where("lease_owner", "=", owner)
+      .executeTakeFirst();
+    return Number(result.numUpdatedRows) === 1;
+  }
+
   public async fail(id: string, owner: string, error: unknown, attemptCount: number): Promise<void> {
     const explicitlyNonRetryable = error !== null
       && typeof error === "object"
@@ -167,7 +192,7 @@ export class PostgresJobQueue {
       .where("lease_owner", "=", owner)
       .executeTakeFirst();
     if (Number(result.numUpdatedRows) !== 1) {
-      throw new Error("job lease was lost before transition");
+      throw new JobLeaseLostError(id);
     }
   }
 }

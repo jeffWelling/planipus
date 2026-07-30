@@ -1,7 +1,13 @@
 import type {
+  ApiTokenScope,
+  ApiTokenSummary,
   CalendarEndpoint,
   Capabilities,
   Connection,
+  ConflictResponseDraft,
+  ConflictResponsePreview,
+  ConflictResponseRule,
+  CreatedApiToken,
   Overview,
   Preview,
   PreviewRequest,
@@ -34,7 +40,7 @@ interface ConnectionDocument {
   id: string;
   provider: string;
   display_label?: string;
-  intended_role: "source" | "destination" | "both";
+  intended_role: "availability" | "source" | "destination" | "both";
   email_masked: string;
   status: "active" | "action_required" | "revoked";
   last_success_at?: string | null;
@@ -49,6 +55,7 @@ interface CalendarDocument {
   timezone: string;
   readable: boolean;
   writable: boolean;
+  capabilities?: unknown;
   primary_calendar: boolean;
 }
 
@@ -146,6 +153,65 @@ interface PlanningSuggestionDocument {
   expires_at: string;
 }
 
+interface ConflictResponsePreviewDocument {
+  preview_token: string;
+  expires_at: string;
+  invitation_count?: number;
+  matching_invitation_count?: number;
+  decline_count?: number;
+  conflict_count?: number;
+  held_count?: number;
+  budget_held_count?: number;
+  counts?: Record<string, number>;
+  examples?: Array<{
+    start_at: string;
+    end_at: string;
+  }>;
+  candidate_times?: Array<{
+    start_at: string;
+    end_at: string;
+  }>;
+  warnings?: string[];
+  provider_writes_enabled?: boolean;
+  message_delivery?: "simulated" | "unverified_google";
+}
+
+interface ConflictResponseRuleDocument {
+  id: string;
+  name: string;
+  status: "active" | "paused";
+  response_calendar_id: string;
+  response_calendar_name?: string;
+  availability_calendar_ids?: string[];
+  availability_calendars?: Array<{ id: string }>;
+  availability_calendar_count?: number;
+  decline_message: string;
+  horizon_days: number;
+  pending_count?: number;
+  declined_count?: number;
+  held_count?: number;
+  last_evaluated_at?: string | null;
+  last_success_at?: string | null;
+  safe_error_code?: string | null;
+  provider_writes_enabled?: boolean;
+  message_delivery?: "simulated" | "unverified_google";
+}
+
+interface ApiTokenDocument {
+  id: string;
+  label: string;
+  scopes: ApiTokenScope[];
+  created_at?: string;
+  expires_at?: string | null;
+  last_used_at?: string | null;
+  revoked_at?: string | null;
+}
+
+interface CreatedApiTokenDocument extends ApiTokenDocument {
+  token?: string;
+  plaintext_token?: string;
+}
+
 let csrfToken: string | undefined;
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -196,12 +262,20 @@ function sessionFrom(document: SessionDocument): Session {
 }
 
 function mapCalendar(document: CalendarDocument): CalendarEndpoint {
+  const freeBusyReadable = document.readable
+    || (
+      typeof document.capabilities === "object"
+      && document.capabilities !== null
+      && !Array.isArray(document.capabilities)
+      && (document.capabilities as Record<string, unknown>)["freebusy_readable"] === true
+    );
   return {
     id: document.id,
     connectionId: document.connection_id,
     name: document.name,
     primary: document.primary_calendar,
     readable: document.readable,
+    freeBusyReadable,
     writable: document.writable,
     timeZone: document.timezone
   };
@@ -272,6 +346,43 @@ function mapPlanningRule(document: PlanningRuleDocument): PlanningRule {
       ...(occurrence.end_at ? { endAt: occurrence.end_at } : {})
     })),
     ...(document.last_success_at ? { lastSuccessAt: document.last_success_at } : {})
+  };
+}
+
+function mapConflictResponseRule(document: ConflictResponseRuleDocument): ConflictResponseRule {
+  const availabilityCalendarIds = document.availability_calendar_ids
+    ?? document.availability_calendars?.map((calendar) => calendar.id)
+    ?? [];
+  return {
+    id: document.id,
+    name: document.name,
+    status: document.status,
+    responseCalendarId: document.response_calendar_id,
+    ...(document.response_calendar_name ? { responseCalendarName: document.response_calendar_name } : {}),
+    availabilityCalendarIds,
+    availabilityCalendarCount: document.availability_calendar_count ?? availabilityCalendarIds.length,
+    declineMessage: document.decline_message,
+    horizonDays: document.horizon_days,
+    pendingCount: document.pending_count ?? 0,
+    declinedCount: document.declined_count ?? 0,
+    heldCount: document.held_count ?? 0,
+    providerWritesEnabled: document.provider_writes_enabled ?? false,
+    messageDelivery: document.message_delivery ?? "unverified_google",
+    ...(document.last_evaluated_at ? { lastEvaluatedAt: document.last_evaluated_at } : {}),
+    ...(document.last_success_at ? { lastSuccessAt: document.last_success_at } : {}),
+    ...(document.safe_error_code ? { safeErrorCode: document.safe_error_code } : {})
+  };
+}
+
+function mapApiToken(document: ApiTokenDocument): ApiTokenSummary {
+  return {
+    id: document.id,
+    label: document.label,
+    scopes: document.scopes,
+    createdAt: document.created_at ?? new Date().toISOString(),
+    ...(document.expires_at ? { expiresAt: document.expires_at } : {}),
+    ...(document.last_used_at ? { lastUsedAt: document.last_used_at } : {}),
+    ...(document.revoked_at ? { revokedAt: document.revoked_at } : {})
   };
 }
 
@@ -361,13 +472,93 @@ export const api = {
       calendar_bridges: Capabilities["calendarBridges"];
       availability_protection: Capabilities["availabilityProtection"];
       smart_meetings: Capabilities["smartMeetings"];
+      conflict_auto_decline?: Capabilities["conflictAutoDecline"];
+      conflict_auto_decline_provider_writes?: boolean;
+      conflict_decline_message_delivery?: Capabilities["conflictDeclineMessageDelivery"];
+      api_server?: Capabilities["apiServer"];
+      mcp_server?: Capabilities["mcpServer"];
     }>("/api/v1/capabilities");
     return {
       calendarBridges: value.calendar_bridges,
       availabilityProtection: value.availability_protection,
-      smartMeetings: value.smart_meetings
+      smartMeetings: value.smart_meetings,
+      conflictAutoDecline: value.conflict_auto_decline ?? "unavailable",
+      conflictAutoDeclineProviderWrites: value.conflict_auto_decline_provider_writes ?? false,
+      conflictDeclineMessageDelivery: value.conflict_decline_message_delivery ?? "unverified_google",
+      apiServer: value.api_server ?? "unavailable",
+      mcpServer: value.mcp_server ?? "unavailable"
     };
   },
+
+  async conflictResponseRules(): Promise<ConflictResponseRule[]> {
+    return (await request<ConflictResponseRuleDocument[]>("/api/v1/conflict-response/rules"))
+      .map(mapConflictResponseRule);
+  },
+
+  async previewConflictResponse(draft: ConflictResponseDraft): Promise<ConflictResponsePreview> {
+    const value = await request<ConflictResponsePreviewDocument>("/api/v1/conflict-response/preview", {
+      method: "POST",
+      body: JSON.stringify(draft)
+    });
+    const examples = value.examples ?? value.candidate_times ?? [];
+    const invitationCount = value.invitation_count
+      ?? value.matching_invitation_count
+      ?? value.decline_count
+      ?? value.counts?.["decline"]
+      ?? value.counts?.["invitation"]
+      ?? 0;
+    return {
+      previewToken: value.preview_token,
+      expiresAt: value.expires_at,
+      invitationCount,
+      conflictCount: value.conflict_count ?? value.counts?.["conflict"] ?? invitationCount,
+      heldCount: value.held_count ?? value.counts?.["held"] ?? 0,
+      budgetHeldCount: value.budget_held_count ?? 0,
+      examples: examples.map((example) => ({ startAt: example.start_at, endAt: example.end_at })),
+      warnings: value.warnings ?? [],
+      providerWritesEnabled: value.provider_writes_enabled ?? false,
+      messageDelivery: value.message_delivery ?? "unverified_google"
+    };
+  },
+
+  activateConflictResponse: (previewToken: string) =>
+    request<{ id: string }>("/api/v1/conflict-response/rules", {
+      method: "POST",
+      body: JSON.stringify({ preview_token: previewToken })
+    }),
+  pauseConflictResponse: (ruleId: string) =>
+    request<void>(`/api/v1/conflict-response/rules/${encodeURIComponent(ruleId)}/pause`, { method: "POST" }),
+  resumeConflictResponse: (ruleId: string) =>
+    request<void>(`/api/v1/conflict-response/rules/${encodeURIComponent(ruleId)}/resume`, { method: "POST" }),
+  reconcileConflictResponse: (ruleId: string) =>
+    request<{ enqueued?: boolean }>(`/api/v1/conflict-response/rules/${encodeURIComponent(ruleId)}/reconcile`, { method: "POST" }),
+  retireConflictResponse: (ruleId: string) =>
+    request<void>(`/api/v1/conflict-response/rules/${encodeURIComponent(ruleId)}`, { method: "DELETE" }),
+
+  async apiTokens(): Promise<ApiTokenSummary[]> {
+    return (await request<ApiTokenDocument[]>("/api/v1/api-tokens")).map(mapApiToken);
+  },
+
+  async createApiToken(input: {
+    label: string;
+    scopes: ApiTokenScope[];
+    expiresInDays?: number;
+  }): Promise<CreatedApiToken> {
+    const document = await request<CreatedApiTokenDocument>("/api/v1/api-tokens", {
+      method: "POST",
+      body: JSON.stringify({
+        label: input.label,
+        scopes: input.scopes,
+        ...(input.expiresInDays ? { expires_in_days: input.expiresInDays } : {})
+      })
+    });
+    const token = document.token ?? document.plaintext_token;
+    if (!token) throw new ApiError("The server did not return the one-time token value", 500, "token_value_missing");
+    return { ...mapApiToken(document), token };
+  },
+
+  revokeApiToken: (tokenId: string) =>
+    request<void>(`/api/v1/api-tokens/${encodeURIComponent(tokenId)}`, { method: "DELETE" }),
 
   async planningRules(): Promise<PlanningRule[]> {
     return (await request<PlanningRuleDocument[]>("/api/v1/planning/rules")).map(mapPlanningRule);
@@ -448,7 +639,10 @@ export const api = {
     ));
   },
 
-  async beginGoogle(label: string, role: "source" | "destination" | "both"): Promise<void> {
+  async beginGoogle(
+    label: string,
+    role: "availability" | "source" | "destination" | "both"
+  ): Promise<void> {
     const authorization = await request<{ authorization_url: string }>("/api/v1/connections/google/authorize", {
       method: "POST",
       body: JSON.stringify({ label, role })

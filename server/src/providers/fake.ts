@@ -2,9 +2,14 @@ import type { DesiredCopy, SourceObservation } from "@planipus/calendar-sync";
 
 import type {
   CalendarProvider,
+  ProviderBusyInterval,
   ProviderEventLookup,
   ProviderCalendar,
+  ProviderDeclineInvitationRequest,
+  ProviderDeclineInvitationResult,
   ProviderEventPage,
+  ProviderFreeBusyRequest,
+  ProviderFreeBusyResult,
   ProviderPlanningEventLookup,
   ProviderWriteResult
 } from "./types.js";
@@ -22,12 +27,32 @@ interface FakeStoredPlanningEvent {
   revision: number;
 }
 
+interface FakeStoredInvitation {
+  readonly organizerSelf: boolean;
+  readonly selfAttendeeEmail: string | null;
+  readonly cancelled: boolean;
+  readonly responseStatus: "accepted" | "tentative" | "declined" | "needs_action";
+  readonly comment: string;
+  readonly revision: number;
+}
+
+export interface FakeInvitationFixture {
+  readonly organizerSelf?: boolean;
+  readonly selfAttendeeEmail?: string | null;
+  readonly cancelled?: boolean;
+  readonly responseStatus?: FakeStoredInvitation["responseStatus"];
+  readonly comment?: string;
+  readonly revision?: number;
+}
+
 export type FakeFailure = "timeout_after_write" | "rate_limited" | "precondition" | "gone_cursor" | "unauthorized";
 
 export class FakeCalendarProvider implements CalendarProvider {
   private readonly calendars = new Map<string, Map<string, ProviderCalendar>>();
   private readonly events = new Map<string, FakeStoredEvent>();
   private readonly observations = new Map<string, Map<string, SourceObservation[]>>();
+  private readonly freeBusy = new Map<string, Map<string, ProviderBusyInterval[]>>();
+  private readonly invitations = new Map<string, FakeStoredInvitation>();
   private readonly planningEvents = new Map<string, FakeStoredPlanningEvent>();
   private readonly seenAccessTokens = new Map<string, Set<string>>();
   private nextFailure: FakeFailure | null = null;
@@ -45,6 +70,32 @@ export class FakeCalendarProvider implements CalendarProvider {
     accessToken = DEFAULT_FAKE_ACCESS_TOKEN
   ): void {
     this.observationBucket(accessToken).set(calendarId, [...values]);
+  }
+
+  public setFreeBusy(
+    calendarId: string,
+    values: readonly ProviderBusyInterval[],
+    accessToken = DEFAULT_FAKE_ACCESS_TOKEN
+  ): void {
+    this.freeBusyBucket(accessToken).set(calendarId, [...values]);
+  }
+
+  public setInvitation(
+    calendarId: string,
+    eventId: string,
+    fixture: FakeInvitationFixture = {},
+    accessToken = DEFAULT_FAKE_ACCESS_TOKEN
+  ): void {
+    this.invitations.set(this.key(accessToken, calendarId, eventId), {
+      organizerSelf: fixture.organizerSelf ?? false,
+      selfAttendeeEmail: fixture.selfAttendeeEmail === undefined
+        ? "self@example.invalid"
+        : fixture.selfAttendeeEmail,
+      cancelled: fixture.cancelled ?? false,
+      responseStatus: fixture.responseStatus ?? "needs_action",
+      comment: fixture.comment ?? "",
+      revision: fixture.revision ?? 1
+    });
   }
 
   public failNext(failure: FakeFailure): void {
@@ -86,6 +137,23 @@ export class FakeCalendarProvider implements CalendarProvider {
   public async listCalendars(accessToken: string): Promise<readonly ProviderCalendar[]> {
     this.maybeFailAuthentication();
     return [...(this.calendars.get(accessToken) ?? new Map()).values()];
+  }
+
+  public async queryFreeBusy(
+    accessToken: string,
+    request: ProviderFreeBusyRequest
+  ): Promise<ProviderFreeBusyResult> {
+    this.maybeFailAuthentication();
+    assertFreeBusyRequest(request);
+    const values = this.freeBusy.get(accessToken);
+    return {
+      timeMin: request.timeMin,
+      timeMax: request.timeMax,
+      calendars: request.calendarIds.map((calendarId) => ({
+        calendarId,
+        busy: [...(values?.get(calendarId) ?? [])]
+      }))
+    };
   }
 
   public async listEvents(
@@ -195,6 +263,46 @@ export class FakeCalendarProvider implements CalendarProvider {
     }
   }
 
+  public async declineInvitation(
+    accessToken: string,
+    calendarId: string,
+    eventId: string,
+    request: ProviderDeclineInvitationRequest
+  ): Promise<ProviderDeclineInvitationResult> {
+    this.maybeFailBeforeWrite();
+    this.rememberAccessToken(calendarId, accessToken);
+    const key = this.key(accessToken, calendarId, eventId);
+    const event = this.invitations.get(key);
+    if (!event) {
+      throw new ProviderError("not_found", "fake invitation is missing", false, false, 404);
+    }
+    requireRespondableInvitation(event);
+    if (event.responseStatus === "declined" && event.comment === request.comment) {
+      return declineResult(eventId, event, false);
+    }
+    if (event.responseStatus !== "needs_action") {
+      throw new ProviderError(
+        "invitation_already_answered",
+        "fake invitation already has an attendee response",
+        false
+      );
+    }
+    if (request.expectedRevision && request.expectedRevision !== String(event.revision)) {
+      throw new ProviderError("precondition_failed", "fake invitation revision changed", false, false, 412);
+    }
+    const updated: FakeStoredInvitation = {
+      ...event,
+      responseStatus: "declined",
+      comment: request.comment,
+      revision: event.revision + 1
+    };
+    this.invitations.set(key, updated);
+    // Model read-after-ambiguous-write recovery inside this idempotent provider
+    // operation: the state is known to match, so no blind retry is needed.
+    this.consumeFailure("timeout_after_write");
+    return declineResult(eventId, updated, true);
+  }
+
   public async getPlanningEvent(
     accessToken: string,
     calendarId: string,
@@ -295,6 +403,16 @@ export class FakeCalendarProvider implements CalendarProvider {
     return this.events.get(this.key(token, calendarId, eventId))?.desired ?? null;
   }
 
+  public invitation(
+    calendarId: string,
+    eventId: string,
+    accessToken?: string
+  ): FakeInvitationFixture | null {
+    const token = this.accessTokenForHook(calendarId, accessToken);
+    const event = this.invitations.get(this.key(token, calendarId, eventId));
+    return event ? { ...event } : null;
+  }
+
   private key(accessToken: string, calendarId: string, eventId: string): string {
     return `${accessToken}\u0000${calendarId}\u0000${eventId}`;
   }
@@ -329,6 +447,14 @@ export class FakeCalendarProvider implements CalendarProvider {
     return bucket;
   }
 
+  private freeBusyBucket(accessToken: string): Map<string, ProviderBusyInterval[]> {
+    const existing = this.freeBusy.get(accessToken);
+    if (existing) return existing;
+    const bucket = new Map<string, ProviderBusyInterval[]>();
+    this.freeBusy.set(accessToken, bucket);
+    return bucket;
+  }
+
   private consumeFailure(expected: FakeFailure): boolean {
     if (this.nextFailure !== expected) {
       return false;
@@ -352,4 +478,44 @@ export class FakeCalendarProvider implements CalendarProvider {
       throw new ProviderError("provider_auth", "fake provider authorization failed", false, false, 401);
     }
   }
+}
+
+function assertFreeBusyRequest(request: ProviderFreeBusyRequest): void {
+  const minimum = Date.parse(request.timeMin);
+  const maximum = Date.parse(request.timeMax);
+  if (
+    request.calendarIds.length < 1
+    || request.calendarIds.length > 50
+    || new Set(request.calendarIds).size !== request.calendarIds.length
+    || request.calendarIds.some((calendarId) => calendarId.length < 1)
+    || !Number.isFinite(minimum)
+    || !Number.isFinite(maximum)
+    || minimum >= maximum
+  ) {
+    throw new ProviderError("invalid_freebusy_request", "free/busy request is invalid", false);
+  }
+}
+
+function requireRespondableInvitation(event: FakeStoredInvitation): void {
+  if (event.cancelled) {
+    throw new ProviderError("invitation_cancelled", "invitation is cancelled", false, false, 410);
+  }
+  if (event.organizerSelf || !event.selfAttendeeEmail) {
+    throw new ProviderError("not_invitation", "event is not an invitation for this identity", false);
+  }
+}
+
+function declineResult(
+  eventId: string,
+  event: FakeStoredInvitation,
+  changed: boolean
+): ProviderDeclineInvitationResult {
+  return {
+    remoteEventId: eventId,
+    remoteRevision: String(event.revision),
+    responseStatus: "declined",
+    comment: event.comment,
+    commentRetained: true,
+    changed
+  };
 }

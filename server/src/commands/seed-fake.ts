@@ -19,6 +19,8 @@ const SOURCE_CALENDAR_ID = "00000000-0000-7000-8000-000000000020";
 const DESTINATION_CALENDAR_ID = "00000000-0000-7000-8000-000000000021";
 const SOURCE_CURSOR_ID = "00000000-0000-7000-8000-000000000030";
 const SOURCE_OBSERVATION_ID = "00000000-0000-7000-8000-000000000031";
+const WORK_CURSOR_ID = "00000000-0000-7000-8000-000000000032";
+const WORK_OBSERVATION_ID = "00000000-0000-7000-8000-000000000033";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -33,10 +35,16 @@ async function main(): Promise<void> {
     );
     const now = new Date();
     const observation = demoObservation(now);
+    const workInvitation = demoWorkInvitation(observation);
     const queryFingerprint = calendarSyncQueryFingerprint(
       sharedPolicyRuntime,
       "fake",
       "fake-personal-primary"
+    );
+    const workQueryFingerprint = calendarSyncQueryFingerprint(
+      sharedPolicyRuntime,
+      "fake",
+      "fake-work-primary"
     );
     let repairedEndpointCount = 0;
     await database.db.transaction().execute(async (transaction) => {
@@ -68,11 +76,11 @@ async function main(): Promise<void> {
             remote_subject: "fake-work-account",
             account_label: "work@example.invalid",
             display_label: "Work demo",
-            intended_role: "destination",
+            intended_role: "both",
             email_masked: "w•••@example.invalid",
             credential_envelope: { fixture: "local-development-only" },
             key_version: "fake-v1",
-            scopes: JSON.stringify(["calendar.write"]),
+            scopes: JSON.stringify(["calendar.read", "calendar.write"]),
             status: "active",
             last_success_at: now,
             safe_error_code: null
@@ -90,7 +98,7 @@ async function main(): Promise<void> {
       }).where("id", "=", SOURCE_CONNECTION_ID).executeTakeFirstOrThrow();
       await transaction.updateTable("provider_connections").set({
         display_label: "Work demo",
-        intended_role: "destination",
+        intended_role: "both",
         status: "active",
         last_success_at: now,
         safe_error_code: null,
@@ -120,7 +128,7 @@ async function main(): Promise<void> {
             name: "Work",
             timezone: "America/Vancouver",
             access_role: "owner",
-            readable: false,
+            readable: true,
             writable: true,
             primary_calendar: true,
             capabilities: {
@@ -150,7 +158,7 @@ async function main(): Promise<void> {
         name: "Work",
         timezone: "America/Vancouver",
         access_role: "owner",
-        readable: false,
+        readable: true,
         writable: true,
         primary_calendar: true,
         capabilities: {
@@ -194,6 +202,31 @@ async function main(): Promise<void> {
         }))
         .execute();
       await transaction
+        .insertInto("sync_cursors")
+        .values({
+          id: WORK_CURSOR_ID,
+          organization_id: PERSONAL_ORGANIZATION_ID,
+          calendar_endpoint_id: DESTINATION_CALENDAR_ID,
+          query_fingerprint: workQueryFingerprint,
+          sync_token: "fake-work-sync-1",
+          generation: 1,
+          state: "ready",
+          last_started_at: now,
+          last_full_sync_at: now,
+          last_success_at: now,
+          safe_error_code: null
+        })
+        .onConflict((conflict) => conflict.columns(["calendar_endpoint_id", "query_fingerprint"]).doUpdateSet({
+          sync_token: "fake-work-sync-1",
+          state: "ready",
+          last_started_at: now,
+          last_full_sync_at: now,
+          last_success_at: now,
+          safe_error_code: null,
+          updated_at: now
+        }))
+        .execute();
+      await transaction
         .insertInto("source_observations")
         .values({
           id: SOURCE_OBSERVATION_ID,
@@ -217,6 +250,37 @@ async function main(): Promise<void> {
           normalized_event: observation,
           observation_hash: sharedPolicyRuntime.hash(observation),
           remote_etag: observation.remote_revision,
+          managed_copy: false,
+          tombstone: false,
+          sync_generation: 1,
+          observed_at: now,
+          updated_at: now
+        }))
+        .execute();
+      await transaction
+        .insertInto("source_observations")
+        .values({
+          id: WORK_OBSERVATION_ID,
+          organization_id: PERSONAL_ORGANIZATION_ID,
+          calendar_endpoint_id: DESTINATION_CALENDAR_ID,
+          remote_event_id: workInvitation.source_event_ref,
+          recurrence_identity: workInvitation.source_occurrence_ref,
+          remote_etag: workInvitation.remote_revision,
+          normalized_event: workInvitation,
+          observation_hash: sharedPolicyRuntime.hash(workInvitation),
+          managed_copy: false,
+          tombstone: false,
+          sync_generation: 1,
+          observed_at: now
+        })
+        .onConflict((conflict) => conflict.columns([
+          "calendar_endpoint_id",
+          "remote_event_id",
+          "recurrence_identity"
+        ]).doUpdateSet({
+          normalized_event: workInvitation,
+          observation_hash: sharedPolicyRuntime.hash(workInvitation),
+          remote_etag: workInvitation.remote_revision,
           managed_copy: false,
           tombstone: false,
           sync_generation: 1,
@@ -262,6 +326,29 @@ function demoObservation(now: Date): SourceObservation {
       description: "This field should disappear under Busy only.",
       location: "Private demo location"
     }
+  };
+}
+
+function demoWorkInvitation(personal: SourceObservation): SourceObservation {
+  if (personal.timing?.kind !== "timed") {
+    throw new Error("the fake personal fixture must be timed");
+  }
+  return {
+    source_event_ref: "fake-work-demo-invitation",
+    source_occurrence_ref: "",
+    remote_revision: "1",
+    lifecycle: "confirmed",
+    origin: "provider_original",
+    timing: { ...personal.timing },
+    availability: "busy",
+    relationship: { role: "attendee", response: "needs_action" },
+    destination_identity_invited: false,
+    content: {
+      summary: "Demo team invitation",
+      description: "This unanswered work invitation overlaps the private demo appointment."
+    },
+    organizer: "organizer@example.invalid",
+    attendees: ["work@example.invalid"]
   };
 }
 

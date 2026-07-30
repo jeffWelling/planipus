@@ -13,6 +13,9 @@ Repository root: `planipus/`
 | [REUSE-MAP.md](REUSE-MAP.md) | Adopt/adapt/integrate ledger and original-code gate |
 | [FOUNDATION-GATE.md](FOUNDATION-GATE.md) | Clean-room provenance, component, conformance, recovery and release gates |
 | [RESEARCH.md](RESEARCH.md) | Reclaim deep dive, competitor matrix, market gaps |
+| [PERSONAS.md](PERSONAS.md) | Nine adversarially-critiqued users; the three disclosure tiers and what no tier can promise |
+| [SURFACES.md](SURFACES.md) | Operation registry, API/CLI/MCP/web parity contract, and the agent-output envelope |
+| [PLAN-NEXT-2026-07-30.md](PLAN-NEXT-2026-07-30.md) | Verified defects, disclosure model, sequencing, and non-goals |
 | [REQUIREMENTS.md](REQUIREMENTS.md) | Measurable product requirements and acceptance tests |
 | [TRACEABILITY.md](TRACEABILITY.md) | Requirement-to-design/milestone/test ownership |
 | [PRODUCT.md](PRODUCT.md) | Product model, user journeys, and interface behavior |
@@ -20,6 +23,7 @@ Repository root: `planipus/`
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Components, data flow, provider boundaries, scaling |
 | [DATA-MODEL.md](DATA-MODEL.md) | Aggregate, table, lifecycle, and migration specification |
 | [API.md](API.md) | Server-edition HTTP, webhook, CLI, and MCP contract; not used by Mac |
+| [CONFLICT-RESPONSE-AND-MCP.md](CONFLICT-RESPONSE-AND-MCP.md) | Authoritative Server-only no-copy RSVP, API-token, and stdio MCP feature contract and release gates |
 | [SOLVER.md](SOLVER.md) | Constraints, scoring, determinism, explanations, benchmarks |
 | [INTEGRATIONS.md](INTEGRATIONS.md) | Provider contracts and delivery sequence |
 | [SECURITY.md](SECURITY.md) | Threat model and safe deployment defaults |

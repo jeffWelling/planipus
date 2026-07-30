@@ -11,10 +11,13 @@ import {
 import { sharedPolicyRuntime } from "../src/policy/runtime.js";
 import { calendarSyncQueryFingerprint } from "../src/sync/query.js";
 
+const SOURCE_CALENDAR_ID = "00000000-0000-7000-8000-000000000101";
+const DESTINATION_CALENDAR_ID = "00000000-0000-7000-8000-000000000102";
+
 const DRAFT: PolicyDraft = {
   name: "Calendar bridge",
-  source_calendar_id: "source-calendar",
-  destination_calendar_id: "destination-calendar",
+  source_calendar_id: SOURCE_CALENDAR_ID,
+  destination_calendar_id: DESTINATION_CALENDAR_ID,
   hours: { mode: "overlaps_profile" },
   hours_profile: {
     name: "Weekday work hours",
@@ -142,18 +145,35 @@ describe("PolicyService inline hours", () => {
       .rejects.toMatchObject({ code: "preview_stale" } satisfies Partial<PolicyInputError>);
     expect(fixture.inserted("sync_policies")).toHaveLength(0);
   });
+
+  it("refuses every outbound bridge before and after preview when a no-copy rule protects its source", async () => {
+    const immediate = policyDatabase({ conflictRule: true });
+    await expect(new PolicyService(immediate.db, sharedPolicyRuntime)
+      .preview("organization-1", "principal-1", DRAFT))
+      .rejects.toMatchObject({ code: "no_copy_rule_conflict" } satisfies Partial<PolicyInputError>);
+
+    const raced = policyDatabase();
+    const policies = new PolicyService(raced.db, sharedPolicyRuntime);
+    const preview = await policies.preview("organization-1", "principal-1", DRAFT);
+    raced.setConflictRule(true);
+    await expect(policies.activate("organization-1", "principal-1", preview.preview_token))
+      .rejects.toMatchObject({ code: "no_copy_rule_conflict" } satisfies Partial<PolicyInputError>);
+    expect(raced.inserted("sync_policies")).toHaveLength(0);
+  });
 });
 
 interface PolicyDatabaseOptions {
   readonly cursorState?: "full_required" | "syncing" | "ready" | "action_required";
   readonly cursorToken?: string | null;
   readonly observationCount?: number;
+  readonly conflictRule?: boolean;
 }
 
 function policyDatabase(options: PolicyDatabaseOptions = {}): {
   readonly db: Kysely<DatabaseSchema>;
   inserted(table: string): Array<Record<string, unknown>>;
   setDestinationRole(role: "source" | "destination" | "both"): void;
+  setConflictRule(present: boolean): void;
   setCursor(state: "full_required" | "syncing" | "ready" | "action_required", token: string | null): void;
 } {
   const values = new Map<string, Array<Record<string, unknown>>>();
@@ -162,6 +182,7 @@ function policyDatabase(options: PolicyDatabaseOptions = {}): {
   let destinationRole: "source" | "destination" | "both" = "destination";
   let cursorState = options.cursorState ?? "ready";
   let cursorToken = options.cursorToken === undefined ? "ready-token" : options.cursorToken;
+  let conflictRule = options.conflictRule ?? false;
 
   const inserted = (table: string): Array<Record<string, unknown>> => {
     const existing = values.get(table);
@@ -184,7 +205,8 @@ function policyDatabase(options: PolicyDatabaseOptions = {}): {
       switch (table) {
         case "calendar_endpoints": return [
           {
-            id: "source-calendar",
+            id: SOURCE_CALENDAR_ID,
+            connection_id: "source-connection",
             remote_id: "source-primary",
             readable: true,
             writable: false,
@@ -194,7 +216,8 @@ function policyDatabase(options: PolicyDatabaseOptions = {}): {
             capabilities: {}
           },
           {
-            id: "destination-calendar",
+            id: DESTINATION_CALENDAR_ID,
+            connection_id: "destination-connection",
             remote_id: "destination-primary",
             readable: false,
             writable: true,
@@ -235,6 +258,7 @@ function policyDatabase(options: PolicyDatabaseOptions = {}): {
           state: cursorState
         }];
         case "policy_previews": return previews;
+        case "conflict_response_rules": return conflictRule ? [{ id: "no-copy-rule" }] : [];
         default: return [];
       }
     };
@@ -289,6 +313,9 @@ function policyDatabase(options: PolicyDatabaseOptions = {}): {
     inserted,
     setDestinationRole(role) {
       destinationRole = role;
+    },
+    setConflictRule(present) {
+      conflictRule = present;
     },
     setCursor(state, token) {
       cursorState = state;

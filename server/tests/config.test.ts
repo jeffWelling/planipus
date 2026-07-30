@@ -19,6 +19,7 @@ describe("loadConfig", () => {
     expect(config.providerMode).toBe("fake");
     expect(config.masterKey).toEqual(Buffer.alloc(32, 7));
     expect(config.googleClientId).toBeNull();
+    expect(config.experimentalGoogleInvitationDecline).toBe(false);
     expect(config.migrationAttempts).toBe(30);
   });
 
@@ -58,5 +59,16 @@ describe("loadConfig", () => {
       .toThrowError(/PLANIPUS_MIGRATION_ATTEMPTS/u);
     expect(() => loadConfig({ ...VALID_ENV, PLANIPUS_MIGRATION_ATTEMPTS: "301" }))
       .toThrowError(/PLANIPUS_MIGRATION_ATTEMPTS/u);
+  });
+
+  it("accepts only an explicit boolean for live Google invitation declines", () => {
+    expect(loadConfig({
+      ...VALID_ENV,
+      PLANIPUS_EXPERIMENTAL_GOOGLE_INVITATION_DECLINE: "true"
+    }).experimentalGoogleInvitationDecline).toBe(true);
+    expect(() => loadConfig({
+      ...VALID_ENV,
+      PLANIPUS_EXPERIMENTAL_GOOGLE_INVITATION_DECLINE: "yes"
+    })).toThrowError(/PLANIPUS_EXPERIMENTAL_GOOGLE_INVITATION_DECLINE/u);
   });
 });

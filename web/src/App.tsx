@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { ApiError, api } from "./api.js";
+import { ConflictResponseScreen } from "./ConflictResponseScreen.js";
 import { ProtectionScreen, SmartMeetingsScreen } from "./PlanningScreens.js";
+import { SettingsScreen } from "./SettingsScreen.js";
 import type {
   Bridge,
   CalendarEndpoint,
@@ -14,8 +16,18 @@ import type {
   StatusTone
 } from "./types.js";
 
-type Screen = "overview" | "calendars" | "bridges" | "protect" | "meetings" | "settings";
+type Screen = "overview" | "notifications" | "calendars" | "bridges" | "private" | "protect" | "meetings" | "settings";
 type ActionRunner = (action: () => Promise<unknown>) => void;
+type MascotMode = "idle" | "attention" | "syncing";
+
+interface AttentionItem {
+  id: string;
+  title: string;
+  detail: string;
+  screen?: Screen;
+  actionLabel?: string;
+  retryOverview?: boolean;
+}
 
 const statusText: Record<StatusTone, string> = {
   current: "All bridges current",
@@ -35,6 +47,66 @@ function formatWhen(value?: string): string {
 
 function copyCountLabel(count: number): string {
   return `${count} ${count === 1 ? "copy" : "copies"}`;
+}
+
+function attentionItems(data: Overview, error?: string): AttentionItem[] {
+  const items: AttentionItem[] = [];
+
+  if (error) {
+    items.push({
+      id: "app-error",
+      title: "Planipus could not refresh",
+      detail: error,
+      actionLabel: "Try again",
+      retryOverview: true
+    });
+  }
+
+  data.connections
+    .filter((connection) => connection.status !== "connected")
+    .forEach((connection) => {
+      items.push({
+        id: `connection-${connection.id}`,
+        title: `${connection.label} needs to reconnect`,
+        detail: connection.status === "revoked"
+          ? `${connection.maskedEmail} no longer grants Planipus calendar access. Reconnect it before bridges can continue.`
+          : `${connection.maskedEmail} needs a quick account check before Planipus can keep it current.`,
+        screen: "calendars",
+        actionLabel: "View calendars"
+      });
+    });
+
+  data.bridges
+    .filter((bridge) => bridge.status === "attention" || bridge.status === "delayed")
+    .forEach((bridge) => {
+      items.push({
+        id: `bridge-${bridge.id}`,
+        title: bridge.status === "attention" ? "A bridge needs a safe retry" : "A bridge is taking longer than usual",
+        detail: `${bridge.sourceLabel} · ${bridge.sourceCalendar} → ${bridge.destinationLabel} · ${bridge.destinationCalendar}`,
+        screen: "bridges",
+        actionLabel: "View bridge"
+      });
+    });
+
+  if (data.status === "delayed" && !items.some((item) => item.id.startsWith("bridge-"))) {
+    items.push({
+      id: "installation-delayed",
+      title: "Calendar updates are delayed",
+      detail: "Planipus has not confirmed a current sync yet. Open the overview to retry safely.",
+      screen: "overview",
+      actionLabel: "Open overview"
+    });
+  } else if (data.status === "attention" && items.length === (error ? 1 : 0)) {
+    items.push({
+      id: "installation-attention",
+      title: "Planipus needs a quick check",
+      detail: "The installation reported an issue, but no calendar details were exposed here. Open the overview for the latest safe status.",
+      screen: "overview",
+      actionLabel: "Open overview"
+    });
+  }
+
+  return items;
 }
 
 function StatusPill({ tone, compact = false }: { tone: StatusTone; compact?: boolean }) {
@@ -106,6 +178,7 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
         <ul className="plain-list">
           <li>Copies only during the hours you choose</li>
           <li>Busy, type-only, private, or selected details</li>
+          <li>Or keep zero copies and decline private conflicts</li>
           <li>After-hours boundaries and flexible Smart Meetings</li>
         </ul>
       </aside>
@@ -113,15 +186,29 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
   );
 }
 
-function Navigation({ current, onChange, capabilities }: { current: Screen; onChange: (screen: Screen) => void; capabilities: Capabilities | undefined }) {
+function Navigation({
+  current,
+  onChange,
+  capabilities,
+  notificationCount = 0
+}: {
+  current: Screen;
+  onChange: (screen: Screen) => void;
+  capabilities: Capabilities | undefined;
+  notificationCount?: number;
+}) {
   const items = ([
     { id: "overview", label: "Overview", glyph: "◌" },
+    { id: "notifications", label: "Attention", glyph: "!" },
     { id: "calendars", label: "Calendars", glyph: "▦" },
     { id: "bridges", label: "Bridges", glyph: "⇢" },
+    { id: "private", label: "Private", glyph: "⊘" },
     { id: "protect", label: "Protect", glyph: "◒" },
     { id: "meetings", label: "Meet", glyph: "◎" },
     { id: "settings", label: "Settings", glyph: "⌁" }
-  ] satisfies Array<{ id: Screen; label: string; glyph: string }>).filter((item) => item.id !== "protect" || capabilities?.availabilityProtection === "alpha")
+  ] satisfies Array<{ id: Screen; label: string; glyph: string }>).filter((item) => item.id !== "notifications" || notificationCount > 0 || current === "notifications")
+    .filter((item) => item.id !== "private" || capabilities?.conflictAutoDecline === "alpha")
+    .filter((item) => item.id !== "protect" || capabilities?.availabilityProtection === "alpha")
     .filter((item) => item.id !== "meetings" || capabilities?.smartMeetings === "alpha");
   return (
     <nav className="navigation" aria-label="Planipus">
@@ -134,20 +221,94 @@ function Navigation({ current, onChange, capabilities }: { current: Screen; onCh
         >
           <span aria-hidden="true">{item.glyph}</span>
           {item.label}
+          {item.id === "notifications" && notificationCount > 0
+            ? <span className="navigation__badge" aria-label={`${notificationCount} items`}>{notificationCount}</span>
+            : null}
         </button>
       ))}
     </nav>
   );
 }
 
+function PipMascot({
+  mode,
+  notificationCount,
+  compact = false,
+  onOpenNotifications
+}: {
+  mode: MascotMode;
+  notificationCount: number;
+  compact?: boolean;
+  onOpenNotifications: () => void;
+}) {
+  const content = mode === "syncing"
+    ? {
+        image: "/mascot/pip-syncing.png",
+        title: "Comparing calendars",
+        detail: "Pip is checking all three schedules."
+      }
+    : mode === "attention"
+      ? {
+          image: "/mascot/pip-attention.png",
+          title: `${notificationCount} ${notificationCount === 1 ? "item needs" : "items need"} attention`,
+          detail: "Pip has the details."
+        }
+      : {
+          image: "/mascot/pip-idle.png",
+          title: "Everything looks tidy",
+          detail: "Pip is happy and content."
+        };
+
+  const body = (
+    <>
+      <img key={mode} className="pip-mascot__image" src={content.image} alt="" />
+      {!compact ? (
+        <span className="pip-mascot__copy" aria-live="polite">
+          <b>{content.title}</b>
+          <small>{content.detail}</small>
+        </span>
+      ) : null}
+    </>
+  );
+
+  if (mode === "attention") {
+    return (
+      <button
+        className={compact ? "pip-mascot pip-mascot--compact pip-mascot--attention" : "pip-mascot pip-mascot--attention"}
+        aria-label={`${content.title}. Open notification details.`}
+        onClick={onOpenNotifications}
+      >
+        {body}
+      </button>
+    );
+  }
+
+  return (
+    <div
+      className={compact ? `pip-mascot pip-mascot--compact pip-mascot--${mode}` : `pip-mascot pip-mascot--${mode}`}
+      role="status"
+      aria-label={`${content.title}. ${content.detail}`}
+    >
+      {body}
+    </div>
+  );
+}
+
 function ConnectionCard({ connection }: { connection: Connection }) {
+  const roleLabel = connection.role === "availability"
+    ? "Private availability only"
+    : connection.role === "source"
+      ? "Read events"
+      : connection.role === "destination"
+        ? "Write copies"
+        : "Read and write events";
   return (
     <article className="connection-card">
       <div className="connection-mark" aria-hidden="true">{connection.label.slice(0, 1).toUpperCase()}</div>
       <div>
         <h3>{connection.label}</h3>
         <p>{connection.maskedEmail}</p>
-        <p className="subtle">{connection.calendars.length} calendars · {connection.status === "connected" ? "Google access current" : "Google access needs attention"}</p>
+        <p className="subtle">{connection.calendars.length} calendars · {roleLabel} · {connection.status === "connected" ? "Google access current" : "Google access needs attention"}</p>
       </div>
       <span className={`connection-state connection-state--${connection.status}`}>
         {connection.status === "connected" ? "Connected" : "Attention"}
@@ -218,10 +379,21 @@ function EmptyOverview({ onConnect }: { onConnect: () => void }) {
 }
 
 function ConnectPanel({ onClose }: { onClose: () => void }) {
+  const dialogRef = useRef<HTMLElement>(null);
   const [label, setLabel] = useState("Personal");
-  const [role, setRole] = useState<"source" | "destination" | "both">("source");
+  const [role, setRole] = useState<Connection["role"]>("availability");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    window.requestAnimationFrame(() => {
+      dialogRef.current?.querySelector<HTMLInputElement>("#account-label")?.focus();
+    });
+    return () => previousFocus?.focus();
+  }, []);
 
   async function connect() {
     setBusy(true);
@@ -236,7 +408,34 @@ function ConnectPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="connect-title">
+      <section
+        ref={dialogRef}
+        className="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="connect-title"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onClose();
+            return;
+          }
+          if (event.key !== "Tab") return;
+          const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
+            "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href]"
+          ));
+          const first = focusable[0];
+          const last = focusable.at(-1);
+          if (!first || !last) return;
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        }}
+      >
         <button className="dialog__close" aria-label="Close" onClick={onClose}>×</button>
         <p className="eyebrow">Google account</p>
         <h2 id="connect-title">Name this calendar boundary</h2>
@@ -245,10 +444,15 @@ function ConnectPanel({ onClose }: { onClose: () => void }) {
         <input id="account-label" value={label} maxLength={40} onChange={(event) => setLabel(event.target.value)} />
         <fieldset className="role-picker">
           <legend>How will this account be used?</legend>
-          {(["source", "destination", "both"] as const).map((value) => (
-            <label key={value}>
-              <input type="radio" name="role" value={value} checked={role === value} onChange={() => setRole(value)} />
-              <span><b>{value === "source" ? "Read from it" : value === "destination" ? "Write copies to it" : "Both directions"}</b><small>{value === "source" ? "Calendar read access" : value === "destination" ? "Calendar list and event write access" : "Read and write access"}</small></span>
+          {([
+            { value: "availability", title: "Private availability only", detail: "Free/busy access only—no event details and no calendar writes" },
+            { value: "source", title: "Read events from it", detail: "Calendar event read access for bridges" },
+            { value: "destination", title: "Write copies to it", detail: "Calendar list and event write access" },
+            { value: "both", title: "Read and write events", detail: "Needed for a work calendar that receives invitations and sends RSVP responses" }
+          ] as const).map((option) => (
+            <label key={option.value}>
+              <input type="radio" name="role" value={option.value} checked={role === option.value} onChange={() => setRole(option.value)} />
+              <span><b>{option.title}</b><small>{option.detail}</small></span>
             </label>
           ))}
         </fieldset>
@@ -265,7 +469,21 @@ function ConnectPanel({ onClose }: { onClose: () => void }) {
   );
 }
 
-function OverviewScreen({ data, onConnect, onCreate, runAction }: { data: Overview; onConnect: () => void; onCreate: () => void; runAction: ActionRunner }) {
+function OverviewScreen({
+  data,
+  onConnect,
+  onCreate,
+  onSync,
+  syncPresentationActive,
+  runAction
+}: {
+  data: Overview;
+  onConnect: () => void;
+  onCreate: () => void;
+  onSync: () => void;
+  syncPresentationActive: boolean;
+  runAction: ActionRunner;
+}) {
   const canCreateBridge = data.connections.some(
     (connection) => connection.role !== "destination" && connection.calendars.some((calendar) => calendar.readable)
   ) && data.connections.some(
@@ -280,7 +498,9 @@ function OverviewScreen({ data, onConnect, onCreate, runAction }: { data: Overvi
           <h2>{statusText[data.status]}</h2>
           <p>{formatWhen(data.lastSuccessAt)} · {data.pendingEffectCount} pending effects</p>
         </div>
-        <button className="button button--secondary" onClick={() => runAction(api.syncNow)}>Sync now</button>
+        <button className="button button--secondary" disabled={syncPresentationActive} onClick={onSync}>
+          {syncPresentationActive ? "Comparing calendars…" : "Sync now"}
+        </button>
       </section>
       <section>
         <div className="section-heading"><div><p className="eyebrow">Calendar boundaries</p><h2>Connected accounts</h2></div><button className="button button--quiet" onClick={onConnect}>Connect another</button></div>
@@ -451,14 +671,85 @@ function BridgeWizard({ connections, onClose, onActivated }: { connections: Conn
   );
 }
 
-function SecondaryScreen({ screen, data, onConnect, onCreate, runAction, capabilities }: { screen: Exclude<Screen, "overview">; data: Overview; onConnect: () => void; onCreate: () => void; runAction: ActionRunner; capabilities: Capabilities | undefined }) {
+function NotificationScreen({
+  items,
+  onNavigate,
+  onRefresh
+}: {
+  items: AttentionItem[];
+  onNavigate: (screen: Screen) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="content-stack">
+      <section className="notification-hero">
+        <div>
+          <p className="eyebrow">Pip noticed something</p>
+          <h1>{items.length ? "A few things need your attention." : "Everything is tidy again."}</h1>
+          <p>
+            {items.length
+              ? "These details stay intentionally brief—enough to recover safely, without exposing private calendar content."
+              : "There are no current calendar or connection notifications."}
+          </p>
+        </div>
+        <img
+          src={items.length ? "/mascot/pip-attention.png" : "/mascot/pip-idle.png"}
+          alt=""
+          aria-hidden="true"
+        />
+      </section>
+      {items.length ? (
+        <section className="notification-list" aria-label="Notification details">
+          {items.map((item) => (
+            <article className="notification-card" key={item.id}>
+              <span className="notification-card__mark" aria-hidden="true">!</span>
+              <div>
+                <h2>{item.title}</h2>
+                <p>{item.detail}</p>
+              </div>
+              {item.retryOverview ? (
+                <button className="button button--quiet" onClick={onRefresh}>{item.actionLabel}</button>
+              ) : item.screen ? (
+                <button className="button button--quiet" onClick={() => onNavigate(item.screen!)}>{item.actionLabel}</button>
+              ) : null}
+            </article>
+          ))}
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+function SecondaryScreen({
+  screen,
+  data,
+  notifications,
+  onNavigate,
+  onRefresh,
+  onConnect,
+  onCreate,
+  runAction,
+  capabilities
+}: {
+  screen: Exclude<Screen, "overview">;
+  data: Overview;
+  notifications: AttentionItem[];
+  onNavigate: (screen: Screen) => void;
+  onRefresh: () => void;
+  onConnect: () => void;
+  onCreate: () => void;
+  runAction: ActionRunner;
+  capabilities: Capabilities | undefined;
+}) {
+  if (screen === "notifications") return <NotificationScreen items={notifications} onNavigate={onNavigate} onRefresh={onRefresh} />;
   if (screen === "calendars") return <div className="content-stack"><div className="section-heading"><div><p className="eyebrow">Provider identities</p><h1>Calendars</h1><p>Every calendar stays attached to the account that authorized it.</p></div><button className="button button--primary" onClick={onConnect}>Connect Google account</button></div><div className="connection-grid">{data.connections.map((item) => <ConnectionCard key={item.id} connection={item} />)}</div></div>;
   if (screen === "bridges") {
     return <div className="content-stack"><div className="section-heading"><div><p className="eyebrow">Directed policies</p><h1>Bridges</h1><p>Each direction has independent hours, privacy, health, and recovery.</p></div><button className="button button--primary" onClick={onCreate}>Create a bridge</button></div><div className="bridge-grid">{data.bridges.map((item) => <BridgeCard key={item.id} bridge={item} onPause={(bridge) => runAction(() => bridge.status === "paused" ? api.resume(bridge.id) : api.pause(bridge.id))} onRecover={(bridge) => runAction(() => api.recover(bridge.id))} />)}</div></div>;
   }
   if (screen === "protect" && capabilities?.availabilityProtection === "alpha") return <ProtectionScreen connections={data.connections} runAction={runAction} />;
   if (screen === "meetings" && capabilities?.smartMeetings === "alpha") return <SmartMeetingsScreen connections={data.connections} runAction={runAction} />;
-  return <div className="content-stack"><div><p className="eyebrow">Installation</p><h1>Settings</h1><p>Planipus Server continues in its own Kubernetes workload when this browser is closed.</p></div><section className="settings-sheet"><h2>Your hours</h2><div className="hours-setting-grid"><article><b>Working Hours</b><span>When bridges and solo work belong.</span></article><article><b>Meeting Hours</b><span>The hard boundary for Smart Meetings.</span></article><article><b>Personal Hours</b><span>Reserved for personal routines and future planning.</span></article></div><p className="quiet-note">Each bridge and Smart Meeting currently stores its own explicit hours. Reusable named-hour editing is the next settings migration.</p></section><section className="settings-sheet"><h2>How after-hours protection works</h2><p>Meeting Hours constrain Planipus suggestions. The optional availability fence in Protect writes private Busy blocks so other calendar tools also see the boundary.</p><button className="button button--quiet" onClick={() => window.dispatchEvent(new CustomEvent("planipus:navigate", { detail: "protect" }))}>Open Protect</button></section><section className="settings-sheet"><h2>Data and diagnostics</h2><p>Provider tokens are envelope-encrypted. Event details are omitted from metrics and routine logs.</p><div className="settings-links"><a href="/api/v1/health/detail">Health detail</a><a href="/api/metrics">Prometheus metrics</a></div></section></div>;
+  if (screen === "private" && capabilities?.conflictAutoDecline === "alpha") return <ConflictResponseScreen connections={data.connections} capabilities={capabilities} runAction={runAction} />;
+  return <SettingsScreen />;
 }
 
 export function App() {
@@ -470,6 +761,13 @@ export function App() {
   const [error, setError] = useState<string>();
   const [connectOpen, setConnectOpen] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [mascotSyncing, setMascotSyncing] = useState(false);
+  const mascotSyncStartedAt = useRef<number | undefined>(undefined);
+  const mascotSyncTimeout = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [screen]);
 
   useEffect(() => {
     void api.session().then(setSession).catch((cause) => {
@@ -478,11 +776,16 @@ export function App() {
     }).finally(() => setLoadingSession(false));
   }, []);
 
-  function refresh() {
+  async function refresh(): Promise<void> {
     if (!session?.authenticated) return;
-    void Promise.all([api.overview(), api.capabilities()])
-      .then(([value, available]) => { setOverview(value); setCapabilities(available); setError(undefined); })
-      .catch((cause) => setError(cause instanceof Error ? cause.message : "Overview is unavailable"));
+    try {
+      const [value, available] = await Promise.all([api.overview(), api.capabilities()]);
+      setOverview(value);
+      setCapabilities(available);
+      setError(undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Overview is unavailable");
+    }
   }
 
   function runAction(action: () => Promise<unknown>) {
@@ -491,7 +794,47 @@ export function App() {
       .catch((cause) => setError(cause instanceof Error ? cause.message : "The requested action did not complete"));
   }
 
-  useEffect(refresh, [session?.authenticated]);
+  function beginMascotSync() {
+    if (mascotSyncTimeout.current !== undefined) {
+      window.clearTimeout(mascotSyncTimeout.current);
+      mascotSyncTimeout.current = undefined;
+    }
+    if (mascotSyncStartedAt.current === undefined) mascotSyncStartedAt.current = performance.now();
+    setMascotSyncing(true);
+  }
+
+  function finishMascotSync() {
+    const startedAt = mascotSyncStartedAt.current;
+    if (startedAt === undefined) return;
+    const remaining = Math.max(0, 3_000 - (performance.now() - startedAt));
+    if (mascotSyncTimeout.current !== undefined) window.clearTimeout(mascotSyncTimeout.current);
+    mascotSyncTimeout.current = window.setTimeout(() => {
+      mascotSyncStartedAt.current = undefined;
+      mascotSyncTimeout.current = undefined;
+      setMascotSyncing(false);
+    }, remaining);
+  }
+
+  function runSync() {
+    beginMascotSync();
+    void api.syncNow()
+      .then(refresh)
+      .catch((cause) => setError(cause instanceof Error ? cause.message : "Calendar sync did not start"))
+      .finally(finishMascotSync);
+  }
+
+  useEffect(() => {
+    void refresh();
+  }, [session?.authenticated]);
+
+  useEffect(() => {
+    if (overview?.status === "syncing") beginMascotSync();
+    else finishMascotSync();
+  }, [overview?.status]);
+
+  useEffect(() => () => {
+    if (mascotSyncTimeout.current !== undefined) window.clearTimeout(mascotSyncTimeout.current);
+  }, []);
 
   useEffect(() => {
     const navigate = (event: Event) => {
@@ -506,20 +849,39 @@ export function App() {
   if (!session?.authenticated) return <Login onLogin={setSession} />;
   if (wizardOpen && overview) return <BridgeWizard connections={overview.connections} onClose={() => setWizardOpen(false)} onActivated={refresh} />;
 
+  const notifications = overview ? attentionItems(overview, error) : [];
+  const syncPresentationActive = mascotSyncing || overview?.status === "syncing";
+  const mascotMode: MascotMode = syncPresentationActive
+    ? "syncing"
+    : notifications.length > 0
+      ? "attention"
+      : "idle";
+  const openNotifications = () => setScreen("notifications");
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand"><span className="pip-mark" aria-hidden="true">P</span><span>Planipus</span></div>
-        <Navigation current={screen} onChange={setScreen} capabilities={capabilities} />
+        <Navigation current={screen} onChange={setScreen} capabilities={capabilities} notificationCount={notifications.length} />
+        <PipMascot mode={mascotMode} notificationCount={notifications.length} onOpenNotifications={openNotifications} />
         <div className="sidebar__status">{overview ? <><StatusPill tone={overview.status} /><small>{formatWhen(overview.lastSuccessAt)}</small></> : <span>Loading health…</span>}</div>
         <button className="text-button sidebar__logout" onClick={() => void api.logout().then(() => setSession({ authenticated: false })).catch((cause) => setError(cause instanceof Error ? cause.message : "Sign out did not complete"))}>Sign out</button>
       </aside>
       <main className="workspace">
-        <header className="mobile-header"><div className="brand"><span className="pip-mark" aria-hidden="true">P</span><span>Planipus</span></div>{overview ? <StatusPill tone={overview.status} compact /> : null}</header>
+        <header className="mobile-header">
+          <div className="brand"><span className="pip-mark" aria-hidden="true">P</span><span>Planipus</span></div>
+          <div className="mobile-header__status">
+            {overview ? <StatusPill tone={overview.status} compact /> : null}
+            <PipMascot compact mode={mascotMode} notificationCount={notifications.length} onOpenNotifications={openNotifications} />
+          </div>
+        </header>
         {error ? <div className="error-banner" role="alert"><div><b>Planipus needs attention</b><span>{error}</span></div><button onClick={refresh}>Try again</button></div> : null}
-        {overview ? screen === "overview" ? <OverviewScreen data={overview} onConnect={() => setConnectOpen(true)} onCreate={() => setWizardOpen(true)} runAction={runAction} /> : <SecondaryScreen screen={screen} data={overview} onConnect={() => setConnectOpen(true)} onCreate={() => setWizardOpen(true)} runAction={runAction} capabilities={capabilities} /> : <div className="loading-sheet">Reading installation state…</div>}
+        {overview ? screen === "overview"
+          ? <OverviewScreen data={overview} onConnect={() => setConnectOpen(true)} onCreate={() => setWizardOpen(true)} onSync={runSync} syncPresentationActive={syncPresentationActive} runAction={runAction} />
+          : <SecondaryScreen screen={screen} data={overview} notifications={notifications} onNavigate={setScreen} onRefresh={() => void refresh()} onConnect={() => setConnectOpen(true)} onCreate={() => setWizardOpen(true)} runAction={runAction} capabilities={capabilities} />
+          : <div className="loading-sheet">Reading installation state…</div>}
       </main>
-      <div className="mobile-nav"><Navigation current={screen} onChange={setScreen} capabilities={capabilities} /></div>
+      <div className="mobile-nav"><Navigation current={screen} onChange={setScreen} capabilities={capabilities} notificationCount={notifications.length} /></div>
       {connectOpen ? <ConnectPanel onClose={() => setConnectOpen(false)} /> : null}
     </div>
   );

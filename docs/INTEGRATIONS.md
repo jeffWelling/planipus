@@ -18,7 +18,12 @@ Every calendar/task/project adapter implements as applicable:
 - bounded initial sync and opaque incremental cursor;
 - webhook/subscription create/renew/validate/delete or documented polling;
 - canonical upsert/delete observations with recurrence/timezone fidelity;
+- opaque provider free/busy queries that return intervals without event identity
+  or content, when an availability-only product path requests them;
 - idempotent create/update/delete with optimistic precondition;
+- exact invitation read and self-attendee RSVP response with optimistic
+  precondition, explicit notification controls, and fail-closed organizer/
+  already-answered behavior when supported;
 - provider error classification: auth, permission, quota, transient, conflict,
   validation, deleted, unsupported;
 - health/lag/action-required state and privacy-safe metrics;
@@ -55,8 +60,12 @@ accounts, pagination, bounded ranges, CRUD, recurrence/timezone handling, retry
 paths, and provenance without donor code/schema/test reuse. Required work:
 
 - PKCE/state, offline refresh, encrypted token, and role-specific least scopes;
-- identity scopes `openid email` plus CalendarList read; source connections use
-  read-only calendar scope and destination connections use event-write scope;
+- identity scopes `openid email` plus CalendarList read; `availability` adds
+  `calendar.freebusy` only and is never event-synced; source connections
+  add read-only events plus free/busy; destination adds event-write; `both` adds
+  event-write plus free/busy and is required to read/respond to work invitations;
+- existing source/both connections need explicit reauthorization before the new
+  free/busy grant is available; no silent scope expansion;
 - master-oriented initial/incremental sync with a persisted query fingerprint;
   materialize recurrence occurrences inside the bounded policy horizon; HTTP
   410 stages a replacement full-sync generation without inferring deletion from
@@ -117,6 +126,103 @@ bring a web OAuth application. Mac distribution uses a separately registered
 Google iOS OAuth client tied to the macOS bundle identifier under the documented
 release/verification model;
 credentials and redirects are not interchangeable between editions.
+
+#### Server no-copy conflict response — alpha
+
+The recommended strict-private personal account role is `availability`. Google
+authorization then grants identity, CalendarList metadata read, and
+`calendar.freebusy`. That free/busy scope does not authorize `Events.list`, and
+Planipus role guards also prevent event ingestion or bridge-source use. Calendar
+discovery is allowed; the event sync scheduler skips that role. Conflict
+response groups selected calendar IDs by connection and uses `freeBusy.query`
+for a bounded UTC range. Only returned busy start/end intervals cross the
+provider port. Discovered endpoints deliberately expose `readable: false`
+because that bit means event-content access, alongside
+`capabilities.freebusy_readable: true`; API/MCP clients select on the latter.
+
+The availability callback checks Google's returned grant. If prior consent
+causes Google to retain any broader Calendar scope, Planipus fails
+`oauth_scope_overbroad`; the user must revoke the old Planipus grant at Google
+and reconnect availability-only. If the token response omits its scope set,
+availability fails `oauth_scope_unverified`; Planipus does not substitute its
+request as proof of the grant. The failed callback does not change the stored
+role or claim that prior observations were purged. All callbacks, including two
+simultaneous first-connect attempts, serialize organization + verified Google
+subject before choosing/upserting the authoritative connection row.
+
+Changing an existing source/both connection to availability-only is not a label
+edit. OAuth reauthorization locks and validates the connection. It returns
+`availability_role_change_blocked` while a live bridge, planning rule, work-
+response rule, or historical projection/action still references event content.
+If clear, the transaction purges observations/cursors, retires subscriptions and
+queued sync work, restricts endpoints, and audits counts before changing the
+role. In-flight sync commits re-lock/revalidate the role so purged content cannot
+reappear. Pausing a dependency is insufficient. Supported planning/response
+rules can be retired; a bridge or historical-reference blocker has no alpha
+retirement/purge path, so keep the broader role or connect a separate dedicated
+availability-only Google account.
+
+Source/both calendars may also supply free/busy when a user separately needs a
+bridge. Those broader roles can already persist normalized personal observations
+for Calendar Sync; the conflict-response domain itself never consumes or stores
+that content. Choose `availability` when the installation-wide requirement is
+that no personal event content be mirrored locally; a dedicated calendar with no
+bridge history is safest. Once selected by a non-deleted rule, the calendar
+cannot be either endpoint of an active bridge. An existing outbound bridge may
+be paused first; its managed copies remain and resume is blocked until the rule
+is retired. Any inbound bridge blocks protection even when paused because its
+surviving copies can feed back as private availability.
+
+Google calendar IDs are global across delegated connections, so bridge and
+conflict-response checks canonicalize the underlying calendar rather than trust
+local endpoint IDs. Duplicate private aliases, response/private aliases, and
+bridge source/destination aliases fail `same_provider_calendar`; provider-
+identity advisory locks make the no-copy invariant hold across concurrent alias
+activation/resume. Migration 0014 quarantines a pre-existing alias self-copy,
+dead-letters its unfinished effects, finishes reconcile jobs, writes
+`policy.quarantined_same_provider_calendar`, and leaves historical copies for
+operator review.
+
+The response calendar uses role `both` and ordinary work event sync to identify
+future confirmed timed provider-original invitations for which the signed-in
+identity is an attendee at `needsAction`. A successful response-calendar sync
+immediately enqueues rule reconciliation, with the 15-minute scheduler as a
+safety fallback. Immediately before apply, the adapter GETs the exact event,
+rejects organizer/cancelled/missing-self and accepted or tentative answers,
+checks `If-Match`, then PATCHes only a `needsAction` self attendee
+with `attendeesOmitted=true`, `responseStatus=declined`, and configured comment.
+For a pending Planipus action, an already-declined self attendee is terminal
+recovery: no PATCH, applied with `changed=false`, and exact comment comparison.
+An absent/different comment warns `decline_comment_not_retained`; either outcome
+appends the immutable decline fact and consumes budget. This can conservatively
+attribute a manual decline but cannot overwrite it or loosen the safety limit.
+Google documents propagation of `responseStatus`,
+not guaranteed delivery of the attendee comment to the organizer. Planipus
+deliberately requests `sendUpdates=none` instead of broad guest updates with
+`sendUpdates=all`.
+The same static comment is used without event-data interpolation. Automatic
+declines above 20 in a rolling 24-hour window for the durable response-provider
+identity are held across current and historical rules. The applied count comes
+from immutable `invitation_response.declined` audit facts, so provider reschedule
+or reuse/supersede of an action row cannot erase it.
+
+The mandatory post-write GET can prove self RSVP `declined` while Google omits
+or changes the requested attendee comment. That result is applied with
+`decline_comment_not_retained`, consumes budget, and is not repeatedly PATCHed.
+It does not prove organizer comment visibility; message delivery remains
+`unverified_google`.
+Write-side Google 5xx and response-read failures are ambiguous, so the adapter
+uses an exact GET verification before reporting success/retry/hold.
+
+Google documentation and local HTTP fixtures are insufficient to claim that the
+comment reaches the organizer or that no email/calendar notification is emitted.
+`PLANIPUS_EXPERIMENTAL_GOOGLE_INVITATION_DECLINE` therefore defaults false. A
+disposable organizer/attendee/personal account matrix is mandatory before
+promotion and must cover recurrence instances, concurrent RSVP/time changes,
+ambiguous timeouts, notification artifacts, quota, and reauthorization. Preview/
+list and capabilities expose provider-write and message-delivery state;
+activation is refused while Google writes are disabled, whereas fake mode is
+explicitly simulated.
 
 ### Microsoft 365 / Outlook Graph — M2
 
@@ -247,7 +353,13 @@ Models are optional intent translators/recommenders:
 
 ## Automation/API ecosystem
 
-- REST/OpenAPI, outgoing webhooks, CLI, and MCP are first-class.
+- The implemented Server REST API is the authority for browser and machine
+  operations. Dedicated tokens are hashed, expiring, and scoped
+  `read|propose|apply`.
+- The implemented MCP adapter uses the official TypeScript SDK 1.29.0 over local
+  stdio and calls only that API over HTTPS/loopback. Read/proposal tools are the
+  default; apply also needs an explicit process flag. Remote Streamable HTTP,
+  outgoing webhooks, and CLI remain future surfaces.
 - n8n/Home Assistant can use webhooks/API; build dedicated integrations only when
   authentication/discovery materially improves safety.
 - Cal.diy/Cal.com coexistence adapter may import event types and observe bookings;

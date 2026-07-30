@@ -3,7 +3,7 @@ import { extname, join, relative } from "node:path";
 
 const root = new URL("../", import.meta.url);
 const rootPath = root.pathname;
-const shippedRoots = ["conformance", "packages", "server", "web", "macos", "deploy", "scripts"];
+const shippedRoots = ["conformance", "packages", "server", "web", "mcp", "macos", "deploy", "scripts"];
 const rootManifests = ["package.json", "package-lock.json", "project.toml", "Procfile"];
 const textExtensions = new Set([
   ".c",

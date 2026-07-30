@@ -54,6 +54,13 @@ auth, CSRF/origin, RBAC/delegation, validation, idempotency, ETag/If-Match,
 pagination, rate limits, plan conflict, partial apply, public booking races,
 webhooks, export/deletion, and structured error schema.
 
+For machine access, include API-token one-time display/digest/expiry/revocation,
+scope implication, active membership/tenant binding, cookie+bearer ambiguity,
+browser-only routes, and actor-preserving audit. Start the stdio MCP adapter
+against the real test API and prove fixed-origin API-only behavior, every tool/
+resource mapping, bounded timeout/response/error handling, apply tools absent by
+default, and API denial even when an MCP process flag exceeds token scope.
+
 ### Browser/accessibility tests
 
 Critical flows at desktop and phone widths, keyboard only, screen-reader labels,
@@ -171,6 +178,88 @@ verified. Live failures do not get waived as “provider flake” without eviden
 - live three-identity Google suite proves source, destination-owner, and ordinary
   coworker views rather than trusting an API payload alone.
 
+### No-copy conflict response — Server alpha release gate
+
+- availability-only Google grant contains CalendarList plus `calendar.freebusy`;
+  it cannot authorize `Events.list`, and role guards/source sync produce no
+  observations or bridge-source capability for that connection;
+- returned availability grant rejects every retained broader Calendar scope as
+  `oauth_scope_overbroad` and an omitted scope set as
+  `oauth_scope_unverified`; requested scopes are never availability proof. A live
+  old-grant revoke and fresh narrow reconnect is proven. Concurrent first-connect
+  callbacks for one organization/Google subject produce one authoritative
+  connection decision;
+- free/busy grouping returns only bounded intervals and per-calendar failures
+  fail closed; half-open adjacent intervals do not conflict;
+- preview returns time-only examples and immutable expiring/one-use stale-bound
+  activation; no response action/provider write occurs during preview;
+- preview/list/capabilities expose consistent provider-write and message-
+  delivery state; fake is simulated, Google activation/resume fails while writes
+  are off, and enabling Google writes leaves delivery unverified;
+- every selected private availability calendar rejects every active outbound
+  bridge and every active/paused inbound bridge across delegated aliases; race
+  conflict activation against bridge activation/resume in both endpoint roles
+  and winner orders to prove shared local/canonical advisory locks prevent
+  invalid committed state;
+- pause an existing bridge, prove no-copy activation succeeds while its older
+  managed copies remain/disclosed, and prove bridge resume fails while the
+  protection rule is non-deleted (including when that rule is paused);
+- idempotent rule retirement supersedes pending/held actions, preserves applied
+  declines, and permits bridge resume without cleaning legacy copies;
+- underlying provider identity prevents a second live controller through a
+  delegated Google alias, and the 20-per-24-hours budget counts historical rules
+  across retirement/recreation and aliases under concurrency;
+- bridge source/destination aliases for one Google calendar fail
+  `same_provider_calendar`; an 0013→0014 upgrade fixture proves existing alias
+  self-copy policies/effects/jobs are fail-closed quarantined, deterministic
+  audit records `historical_copies_untouched:true`, and historical copies remain
+  for review;
+- immutable `invitation_response.declined` audit facts keep the budget after
+  action reschedule/reuse/supersede; concurrent reservations at 19/20 never write
+  a twenty-first automatic decline;
+- availability-only endpoints report event-content `readable=false` and
+  `capabilities.freebusy_readable=true`; API, MCP, and UI select on the latter;
+- source/both → no-event-read reauthorization blocks every live feature and
+  historical projection/action dependency; a clear PostgreSQL transition purges
+  observations/cursors, retires subscriptions/jobs, restricts endpoints, audits
+  counts, and wins against first-connect/reauthorization, activation, discovery,
+  cursor-initialization, page-persistence, and finalization transactions with no
+  deadlock or post-purge content;
+- a newly materialized eligible event is future, confirmed, timed, provider-
+  original, connected self attendee, and exactly `needs_action`; organizer,
+  accepted, tentative, declined, cancelled, all-day, started, changed, malformed,
+  and outside horizon do not create a new action;
+- exact work observation/revision and fresh exact-interval free/busy are checked
+  immediately before the provider GET/PATCH;
+- self-attendee-only PATCH includes configured comment, `attendeesOmitted`,
+  `If-Match`, and requested `sendUpdates=none`; a pending action whose initial
+  exact GET already sees self declined sends no PATCH, becomes applied with
+  `changed=false`, compares the comment exactly, appends the immutable fact, and
+  consumes budget. Accepted/tentative are not overwritten;
+- post-write verified `declined` with an absent/different comment is applied with
+  `decline_comment_not_retained`, consumes immutable budget, is not retried, and
+  does not mark message delivery verified; initial already-declined recovery with
+  the same mismatch produces the same warning and conservatively may attribute a
+  manual decline without overwriting it;
+- duplicate/leased jobs, pause/resume, removed conflict, timeout before/after
+  commit, write-side 5xx/response-read ambiguity followed by exact GET,
+  verification-read failure, 404/410/412/429/auth/quota, and restore converge
+  without duplicate or unconditional RSVP;
+- successful work response-calendar sync immediately enqueues deduplicated rule
+  reconciliation, with the scheduled 15-minute path proven as fallback;
+- slow/hung provider calls prove bounded transaction/lock age, lease and
+  termination behavior until provider I/O is moved behind committed intent;
+- SQL, jobs, audit, logs, metrics, HTTP, backup, and MCP contain no personal
+  event ID/content/copy; work-side target identity is narrowly allowed; and
+- private snapshot/action HMACs resist offline enumeration from database-only
+  material; controlled master-key rotation expires previews, supersedes/recomputes
+  pending/held actions, and proves no old-basis job can apply without claiming
+  multi-key verification; and
+- disposable Google organizer/attendee/personal/observer accounts prove
+  `responseStatus`, best-effort comment visibility and actual mail/calendar-
+  notification behavior. Google does not guarantee organizer delivery of the
+  attendee comment; keep the live flag false until this evidence exists.
+
 ### Security/privacy
 
 - login/session fixation/rotation/logout/revocation;
@@ -181,6 +270,24 @@ verified. Live failures do not get waived as “provider flake” without eviden
 - XSS in titles/descriptions/forms/provider payloads/Markdown/ICS;
 - SQL/path/template injection and oversized/decompression payloads;
 - log/metric/export/error redaction and encrypted backup behavior;
+- API token plaintext appears once, never in storage/log/error/MCP output;
+  expiry/revocation/membership and read/propose/apply boundaries hold;
+- `read` cannot preview; `propose` is proven to contact only selected provider
+  free/busy boundaries and return bounded privacy-safe overlap inference, with
+  no mutation and clear audit/UX sensitivity labeling;
+- actor limits enforce read 600/minute, apply 120/minute and propose 30/10
+  minutes for browser/token/tenant matrices before provider contact, with safe
+  429 + numeric `Retry-After`; restart/multi-replica bypass and map cardinality
+  demonstrate why a shared persistent limiter remains required;
+- conflict preview refuses a principal at 10 live unconsumed rows; concurrent
+  creation is either database-hard or explicitly documented/tested as a
+  preflight-only alpha limitation;
+- MCP provider/event text cannot alter capability; remote HTTP transport is
+  absent; origin/redirect/response limits prevent adapter pivot;
+- MCP's 300-second deadline covers bounded 32-calendar/four-lane provider fan-
+  out; read timeout is retryable `api_timeout`, while POST/DELETE timeout is
+  `api_timeout_outcome_unknown` and a state read precedes any retry, including
+  timeout during response-body consumption;
 - assistant prompt injection cannot raise capability or disclose hidden data.
 
 ### Operations
@@ -204,11 +311,22 @@ Use deterministic barriers to race:
 - task completion versus scheduler repair;
 - membership revoke versus delegated apply;
 - token/key rotation versus provider request;
+- user RSVP/time change versus automatic conflict-response apply;
+- rule pause/revision/availability change versus leased response job;
+- preview creation at the per-principal limit and across API replicas;
+- provider-identity alias activation and historical-budget reservation;
+- scheduled-job heartbeat/final renewal versus a competing reclaim after the
+  original lease interval; and
 - duplicate idempotent POSTs.
 
 The expected result is one winner or a defined merge/conflict, never duplicate
 provider events or silent lost update. Run concurrency suites under race/thread
 sanitizers where supported.
+The worker leases at most one scheduled job and one effect per loop. Lease-loss
+tests require the stale owner to make no terminal transition and continue
+serving; the current owner remains authoritative. Because a provider call cannot
+be cancelled mid-flight, also prove idempotent/conditional provider behavior,
+ambiguity verification, and reconciliation converge after ownership loss.
 
 ## Golden files
 
@@ -249,11 +367,12 @@ leaving recurrence untested.
 
 1. format, lint, license/provenance, secret scan;
 2. unit/property tests and docs link/schema checks;
-3. PostgreSQL repository/migrations and durable-job replay;
-4. API/browser/accessibility;
-5. release image build, SBOM, vulnerability scan, runtime restrictions;
-6. Kubernetes smoke/backup/restore on release candidates;
-7. scheduled live-provider/long-fuzz/benchmark suites.
+3. MCP build/typecheck/unit/boundary tests plus Server workspace checks;
+4. PostgreSQL repository/migrations and durable-job replay;
+5. API/browser/accessibility;
+6. release image build, SBOM, vulnerability scan, runtime restrictions;
+7. Kubernetes smoke/backup/restore on release candidates;
+8. scheduled live-provider/long-fuzz/benchmark suites.
 
 Pull requests must not require proprietary cloud services for baseline CI.
 Provider live suites use protected, least-privilege secrets and untrusted PRs

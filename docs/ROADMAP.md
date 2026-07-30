@@ -80,6 +80,87 @@ Deliverables:
 Exit: two live Google accounts plus an ordinary third-viewer identity pass
 create/update/move/recurrence/delete and disclosure tests.
 
+## S1C — API/MCP and no-copy conflict-response alpha (active Server track)
+
+Goal: let a self-hoster protect work from private conflicts without placing a
+personal placeholder on the work calendar, and expose the same Server authority
+to local MCP clients without a database/provider bypass.
+
+Implemented foundation in the current worktree:
+
+- scoped, expiring, digest-only API tokens with one-time plaintext, owner-only
+  browser administration, tenant/principal binding, audit and revocation;
+- bearer read/propose/apply boundaries on documented Server routes, rejecting
+  ambiguous browser+bearer credentials;
+- process-local per-actor read/apply/propose windows, safe 429/`Retry-After`, and
+  a 10-live-conflict-preview/principal preflight;
+- official-SDK MCP stdio process that calls only the authoritative HTTPS/
+  loopback API, with fixed resources/read/proposal tools by default and apply
+  tools behind both an API scope and process opt-in;
+- strict-private Google `availability` role, CalendarList/free-busy only, never
+  event-synced, with distinct event-read/free-busy capability flags; source/both
+  can also supply free/busy after reauthorization;
+- atomic source/both → no-event-read privacy downgrade that blocks live/
+  historical dependencies, otherwise purges observations/cursors, retires sync
+  work, restricts endpoints, audits counts, and closes in-flight sync races;
+- provider free/busy and exact conditional self-attendee response ports;
+- immutable privacy-safe preview, conflict rule and durable work-response action
+  model, fresh free/busy and exact invitation revalidation, idempotency and
+  ambiguous-write verification;
+- fail-closed organizer/answered/cancelled/all-day/started/changed/no-overlap
+  semantics and protected-calendar exclusion from active bridges in either
+  direction (including paused inbound-copy rejection), with shared advisory
+  locks closing activation/resume races and disclosure of paused outbound copies;
+- keyed private snapshot/action bases, bounded/fresh invitation candidates, one
+  durable response-provider controller, a 20-per-rolling-24-hour historical
+  decline budget backed by immutable verified-decline audit facts, immediate
+  response-sync-triggered reconciliation plus scheduler fallback, idempotent rule
+  retirement, and conservative no-PATCH recovery/applied-with-warning handling
+  when an exact provider read already sees declined but the comment is not
+  retained;
+- canonical Google-global calendar identity for bridges and protected
+  availability, alias-aware no-copy locks/checks, same-calendar alias rejection,
+  historical self-copy quarantine/audit, subject-serialized first-connect, and
+  overbroad or unreported availability-grant refusal;
+- single-item scheduled-job/effect lease limits per worker loop, with heartbeat/
+  final conditional renewal and non-fatal lease-loss handling;
+- Server Private replies and API-token/MCP settings UI; and
+- separate preview/list/capability fields for provider-write and message-delivery
+  state, with Google activation refused while the write gate is off and fake
+  writes labeled simulated.
+
+Required hardening/evidence:
+
+- record the opt-in real-PostgreSQL 0001–0014 service/coordinator lifecycle and
+  protected-calendar activation race in the consolidated gate, then extend it to
+  scheduler/worker process faults, uncancellable in-flight provider calls,
+  restore, duplicate jobs and concurrent provider response;
+- SQL/job/audit/log/metric/API/MCP/backup inspection proving no personal event
+  identity/content and no event sync for availability-only accounts;
+- real-PostgreSQL role-downgrade dependency/purge/in-flight-sync proof and a
+  supported historical-reference cleanup design (until then, fail closed and
+  recommend a separate dedicated availability account);
+- seeded 0013→0014 alias self-copy quarantine/effect/job/audit/copy-preservation
+  upgrade proof, all alias lock winner orders, and live Google old-grant revoke/
+  availability-only reconnect/downgrade evidence;
+- complete health, held repair, edit/retention/export, bridge-copy cleanup,
+  token rotation, and multi-key private-HMAC rotation;
+- packaged MCP-host E2E, current online audit and upstream Hono advisory tracking;
+- shared persistent multi-replica limits, concurrency-hard preview quotas, and
+  planning/public-specific abuse controls;
+- disposable Google consent/reauthorization, comment visibility, actual mail/
+  calendar notification, recurrence instance, precondition, ambiguity, quota,
+  auth and cleanup matrix; and
+- remote Streamable HTTP only after a separate OAuth/resource-server, security,
+  rate-limit and deployment ADR. Stdio may not be proxied into that role.
+
+Exit: an availability-only personal account and both-role work account pass the
+full preview → active rule → conditional RSVP lifecycle in a restored Server;
+no personal event content/copy is present; organizer/comment/notification
+behavior is documented from live evidence; token/MCP least privilege is proven;
+and the live-write flag may be promoted deliberately. This does not replace the
+bridge S1 exit and creates no Mac capability.
+
 ## S1P — Protected Hours and Smart Meetings alpha (active Server track)
 
 Goal: turn the first broader Reclaim-parity behaviors into honest, deterministic
@@ -257,7 +338,8 @@ new breadth follow this risk order:
 
 1. finish the release-critical Google bridge independently in Server and Mac;
 2. finish Server Protected Hours/availability fences and Reclaim 2.0-style
-   Smart Meeting suggestion review/apply, then decide native Mac sequencing;
+   Smart Meeting suggestion review/apply plus no-copy conflict-response live
+   proof, then decide native Mac sequencing;
 3. Outlook bridge and planning-policy parity;
 4. CalDAV bridge compatibility matrix;
 5. ICS/native JSON export and public Server API completeness;
@@ -281,6 +363,10 @@ live provider matrix, and release note.
 - feature gates tied to commercial subscriptions;
 - representing Meeting Hours as a universal block on arbitrary provider
   invitations;
+- exposing the stdio MCP process as a remote HTTP service, or allowing MCP to
+  bypass Server API authorization;
+- claiming no personal event persistence when a selected personal account uses
+  source/both for an independent bridge rather than strict availability-only;
 - silently auto-moving attendee events under a suggest-first policy;
 - calling independent rolling planned events complete recurrence-series parity;
 - AI dependency, tasks, habits, focus, booking, or team optimization before the

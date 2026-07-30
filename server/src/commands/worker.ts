@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 
 import { delay, randomToken } from "../foundation.js";
+import { processLeasedJob } from "../jobs/leased-job.js";
 import { PostgresJobQueue } from "../jobs/queue.js";
 import { processAbortSignal, reportFatal } from "../process.js";
 import { createRuntime } from "../runtime.js";
@@ -13,21 +14,30 @@ async function main(): Promise<void> {
   try {
     while (!signal.aborted) {
       let work = 0;
-      const leased = await jobs.lease(owner, 20, runtime.config.jobLeaseSeconds);
-      for (const job of leased) {
-        try {
-          if (runtime.planningCoordinator.handles(job.kind)) {
-            await runtime.planningCoordinator.dispatch(job);
-          } else {
-            await runtime.coordinator.dispatch(job);
+      const leased = await jobs.lease(owner, 1, runtime.config.jobLeaseSeconds);
+      const job = leased[0];
+      if (job) {
+        const result = await processLeasedJob(
+          jobs,
+          job,
+          owner,
+          runtime.config.jobLeaseSeconds,
+          async (leasedJob) => {
+            if (runtime.conflictResponseCoordinator.handles(leasedJob.kind)) {
+              await runtime.conflictResponseCoordinator.dispatch(leasedJob);
+            } else if (runtime.planningCoordinator.handles(leasedJob.kind)) {
+              await runtime.planningCoordinator.dispatch(leasedJob);
+            } else {
+              await runtime.coordinator.dispatch(leasedJob);
+            }
           }
-          await jobs.succeed(job.id, owner);
-        } catch (error) {
-          await jobs.fail(job.id, owner, error, job.attemptCount);
+        );
+        if (result === "lease_lost") {
+          process.stderr.write(`Planipus worker lost ownership of job ${job.id}; outcome left to current owner.\n`);
         }
       }
       work += leased.length;
-      work += await runtime.effects.runBatch(owner, 20, runtime.config.jobLeaseSeconds);
+      work += await runtime.effects.runBatch(owner, 1, runtime.config.jobLeaseSeconds);
       if (work === 0) {
         await delay(runtime.config.workerIntervalMs, signal).catch(() => undefined);
       }

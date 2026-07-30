@@ -12,6 +12,7 @@
   "workspaces": [
     "packages/calendar-sync",
     "server",
+    "mcp",
     "web"
   ],
   "scripts": {

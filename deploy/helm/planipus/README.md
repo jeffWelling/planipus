@@ -12,6 +12,19 @@ The chart also defaults to the deterministic `fake` calendar provider so an
 incomplete installation cannot contact Google. Set `config.providerMode=google`
 only after the OAuth credentials and public URL are ready.
 
+Live Google planning writes and automatic invitation declines are independent,
+fail-closed experiments. Both default off. Enable them only after completing
+their documented disposable-account evidence gates:
+
+```yaml
+config:
+  experimentalGooglePlanning: false
+  experimentalGoogleInvitationDecline: false
+```
+
+The second flag permits RSVP decline writes; it does not enable planning event
+writes. Fake-provider development remains enabled without either flag.
+
 Create the application Secret named by `existingSecret` before installation. It
 must contain:
 

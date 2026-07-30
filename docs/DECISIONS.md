@@ -1,5 +1,302 @@
 # Decisions
 
+## 2026-07-30 — Symmetric per-edition triads, one operation registry, and a container-socket Mac control plane
+
+Each edition owns a complete triad: Planipus Server has a Server API, CLI and
+MCP; Planipus for Mac gets its own API, CLI and MCP, off by default with
+authentication required. This revises HANDOFF rule 7's "must not embed a local
+web service" and the entitlement rule's "no listener". The web-service
+prohibition stands and is strengthened: the Mac carries no HTTP server, no
+WebSocket and no TCP listener in any build. The entitlement rule survives intact,
+because a Unix-domain socket inside the app's own sandbox container was measured
+to need zero added entitlements — a sandboxed bundle signed with only
+`app-sandbox` and `network.client` binds and listens successfully, while the
+identical bundle receives `EPERM` on `127.0.0.1` until
+`com.apple.security.network.server` is added. Only the prose sentence changes.
+
+HANDOFF rule 3 is unchanged and is now enforced in the credential layer rather
+than by convention. The editions never talk to each other: a `pln_api_`
+credential presented to the Mac and a `plnmac_` credential presented to the
+Server both fail with an audit row carrying `foreign_edition_credential`, and the
+Mac client accepts no URL, hostname, socket path, port or profile from any
+caller, which removes the SSRF shape and mechanically enforces the boundary.
+
+`web/src/api.ts` is no longer the de-facto API contract.
+`conformance/surface/v1/operations.json` declares every operation once; thin
+surfaces (MCP tools, CLI parser, OpenAPI, docs tables) are generated from it and
+thick surfaces (`server/src/api/app.ts` routes with their auth presets,
+`web/src/api.ts` call sites) are checked against it by AST extractor — split by
+blast radius so the release-critical directed-sync path is checked rather than
+rewritten. Parity is a single integer CI asserts is zero, plus a ratchet:
+`SESSION_ONLY_WEB_OPS` is 15 today and may never increase.
+
+The agent-output format is minified JSON, not YAML. This is decided on parse
+reliability with a repository-specific hazard: `source_exclusion_marker` defaults
+to `#nosync`, which unquoted in YAML is a comment that silently nulls the field;
+`LocalTimeString` is `HH:MM`, the sexagesimal shape YAML 1.1 mangles; and enums
+include bare `free`, `busy` and `skip` alongside timezone strings that meet the
+Norway problem. A truncated YAML stream yields a valid-but-wrong document where
+truncated JSON throws. The token-cost claim was measured rather than assumed:
+minified JSON 1,371 chars against block YAML 1,508 for a representative
+`overview.get` payload, because these payloads are arrays of uniform records.
+`--json` is deliberately not an alias for `--agent`; it remains an unstable human
+debugging convenience so nobody scripts against a readability improvement.
+
+`api_timeout_outcome_unknown` on a non-GET gets exit code 11, distinct from the
+GET timeout's 10. A GET may be repeated verbatim; a POST or DELETE may already
+have committed. Merging them would let a retry loop double-activate a bridge or
+send a second round of cancellations to real attendees.
+
+The Mac capability ceiling is existence-shaped rather than field-shaped, because
+a field-shaped ceiling misses the eleven `SyncPolicy` selection knobs that decide
+*which* events become copies while every disclosed field stays a perfectly opaque
+`Busy` block. A revision that can admit an event the previous revision excluded
+is disclosure-increasing, decided by a declared per-knob monotonicity lattice
+plus empirical evaluation of both revisions over the observed window, and is
+UI-only at every scope. Enforcement lives at the effect, not the API call:
+provider writes are produced by the app's own coordinator, so a gate on the
+request is bypassed by an attacker who mutates configuration and waits. The
+coordinator refuses to project from an unratified revision digest.
+
+The Mac local API returns no event title, description, location, attendee,
+organiser or conference URL to any client at any scope in any build, and there is
+no per-event enumeration endpoint. This is absence rather than a flag: the
+exfiltration path is the MCP host's own shell and network tools, so once content
+leaves the app it is in a model provider's retained context and no downstream
+control exists. A boolean a persuasive agent can obtain in one exchange, with a
+90-day blast radius, is not a control. It also dissolves the audit paradox — a
+content-free log can honestly answer "did anything read my calendar?".
+
+Rejected: loopback TCP, because browsers cannot open `AF_UNIX` sockets so the
+whole DNS-rebinding class is deleted rather than mitigated, and because a closed
+port RSTs immediately while an open one completes the handshake, making the
+presence oracle a TCP-layer signal no HTTP-layer masking suppresses — and for
+this product's users, a web page learning Planipus is installed is itself the
+disclosure. Rejected: XPC with a global mach service name, which requires launchd
+registration. Rejected: a CLI `login --local` presenting the bootstrap token to
+obtain a browser session, which is impersonation that silently falsifies
+`requireSession`'s guarantee. Withdrawn: the claim that TCC App Data consent is a
+fourth authentication factor, because npm postinstalls and agent shell tools run
+under exactly the terminals a user must grant that consent to, and an MDM PPPC
+payload grants it with no prompt.
+
+Also recorded: the Mac production Keychain path does not work today.
+`KeychainSecretStore` sets `kSecUseDataProtectionKeychain: true`, which requires
+an `application-identifier`/`keychain-access-groups` entitlement; there is no
+`Info.plist`, `.entitlements` or `.app` outside `.build`, and a probe issuing
+exactly the `SecItemAdd` that `save()` issues returns `-34018
+errSecMissingEntitlement`. `SecretStoreTests` uses `InMemorySecretStore`, so the
+suite never observes it. Packaging is therefore a prerequisite of the Mac triad
+rather than a parallel track.
+
+## 2026-07-22 — Provider-calendar identity, strict availability consent, and conservative decline recovery
+
+Calendar-protection invariants use the underlying provider calendar rather than
+only a local endpoint. Google calendar IDs are global across delegated
+connections, so Planipus canonicalizes them as provider + `global` + remote ID;
+other providers remain connection-scoped. Migration 0014 persists canonical
+sync-policy source/destination identities and selected protected-availability
+identities. Bridge and conflict-response paths lock/check those identities as
+well as local endpoints. New alias self-copy/duplicate selections fail
+`same_provider_calendar`.
+
+The migration fail-closes pre-existing Google alias self-copy bridges: mark the
+policy deleted with `same_provider_calendar`, dead-letter pending/leased/retry
+effects, finish pending/leased/retry reconcile jobs with the same code, and emit
+deterministic audit action `policy.quarantined_same_provider_calendar` with
+`historical_copies_untouched: true`. It deliberately leaves destination copies
+for explicit operator review; silent cleanup would add a distinct destructive
+provider operation.
+
+An availability OAuth callback must prove the returned Google grant is narrow.
+If Google retains any broader Calendar scope from earlier consent, fail
+`oauth_scope_overbroad`; require revocation of the prior Planipus grant at Google
+and a fresh availability-only connection. If Google omits the returned scope set,
+fail `oauth_scope_unverified`; availability never substitutes requested scopes
+as proof. A failed callback neither changes the role nor proves local purge.
+Every callback, including first-connect, serializes
+organization + verified Google subject before choosing the authoritative
+provider-connection row.
+
+For an existing pending Planipus response action, an initial exact provider GET
+that already shows the self attendee declined is terminal conservative recovery:
+no PATCH, `applied`, `changed=false`, exact comment-retention comparison, normal
+immutable decline audit, and 20/24-hour budget consumption. This may
+overattribute a manual decline, but it cannot overwrite a user's answer or
+bypass the blast-radius budget. Accepted/tentative remain held. Google write 5xx
+and response-read ambiguity trigger exact GET verification before the outcome is
+chosen.
+
+## 2026-07-22 — Renew one scheduled-job lease while work is in flight
+
+A worker loop leases at most one `scheduled_job` and at most one bridge outbox
+effect.
+Scheduled-job dispatch owns a heartbeat that conditionally renews every one-
+third of the configured lease and performs a final renewal immediately before a
+terminal success/failure transition. If renewal proves ownership was lost, the
+stale worker records no transition and continues serving; the current owner is
+authoritative. This replaces the earlier twenty-job scheduled batch, which could
+allow later items to expire while the first provider call ran.
+
+Heartbeat is ownership coordination, not provider-call cancellation. An already
+in-flight network operation may finish after lease loss or shutdown starts.
+Correctness still relies on conditional/idempotent provider writes, exact
+ambiguity verification, and reconciliation. Provider I/O while domain rows or
+advisory locks are held remains a scale/release concern.
+
+## 2026-07-21 — No-copy conflict response is a separate Server aggregate
+
+The new requirement is not another privacy preset for a bridge. A conflict-
+response rule reads selected personal availability through provider free/busy
+and may decline an eligible unanswered work invitation with a static comment.
+The comment is never templated from event data. It creates no personal
+placeholder/fence/copy, stores no personal event identity or content in this
+aggregate, and never accepts/undoes an RSVP.
+
+Eligibility is fail closed at reconcile and provider apply: future confirmed
+timed provider-original work event; connected identity is self attendee and not
+organizer; response is exactly `needs_action`; revision and rule still match;
+and a fresh exact-interval free/busy overlap exists. Accepted, tentative,
+cancelled, missing/unknown self, changed, started, all-day and no-longer-
+conflicting events are not overwritten. Already-declined recovery is superseded
+by the conservative pending-action decision above.
+Work sync must be successful within 15 minutes; candidates are indexed/bounded
+to 5,000, invitations may last at most seven days, and excess automatic declines
+are held at 20 per rolling 24 hours across the same response-provider identity.
+The applied count comes from immutable `invitation_response.declined` audit
+facts, not mutable action rows, so reschedule/action reuse/retirement cannot
+erase a prior response from the budget.
+A successful response-calendar sync immediately enqueues rule reconciliation;
+the scheduled 15-minute pass is a safety fallback.
+
+A calendar selected by a non-deleted conflict rule as private availability
+cannot be either endpoint of an **active** directed bridge. Conflict setup also
+rejects active/paused inbound bridges because surviving copies can create self-
+conflicts. Bridge preview/activation/resume reports `no_copy_rule_conflict` when
+either endpoint is protected. These mutation paths acquire the same tenant-
+scoped transaction advisory locks for selected availability calendars or both
+bridge endpoints; sorted, de-duplicated keys prevent deadlocks and close races.
+
+An existing bridge can be paused first. Its managed destination copies remain
+deliberately and are not cleanup work owned by conflict-rule activation. They
+must be disclosed, and the bridge cannot resume while the protection rule is
+non-deleted, even if that rule is paused. Idempotent rule retirement supersedes
+pending/held actions and permits later resume, but never cleans old copies or
+reverses applied declines. Dedicated availability-only calendars without bridge
+history are the safest default.
+
+This is Server-only. The autonomous Mac edition gains nothing through the
+Server and would need its own native decision/implementation/evidence.
+
+## 2026-07-21 — Availability-only OAuth is the strict-private recommendation
+
+Google connection intent adds `availability`, granting identity, CalendarList,
+and `calendar.freebusy` only. The narrow Google scope does not authorize
+`Events.list`; Planipus role guards also prevent event ingestion and bridge-
+source use. This is the recommended personal-account setup when the operator
+requires that no personal event content be persisted by the installation.
+Endpoint `readable` means event-content permission and is therefore false for
+this role; `capabilities.freebusy_readable` is the separate API/MCP capability.
+Planipus deliberately does not use `calendar.events.freebusy`: Google accepts
+that broader event-family scope for `Events.list`, so its name is not a safe
+least-privilege boundary.
+
+Existing `source` and `both` connections may also supply free/busy, because a
+user may need the same account for a bridge. Those roles can independently
+retain normalized source observations; the UI/docs must not overstate the
+installation-wide privacy boundary. Old grants need explicit reauthorization;
+Planipus never silently assumes expanded scope. The work response account is
+`both` so it can read invitations and write the attendee response.
+
+Removing event-read access from an existing source/both connection is an atomic
+privacy transition during OAuth callback, not a metadata toggle. Live bridge,
+planning, response-rule, or historical projection/action dependencies reject it
+with `availability_role_change_blocked`. When clear, Planipus purges observations
+and cursors, retires subscriptions/pending sync jobs, restricts endpoints, and
+audits counts before changing role; concurrent sync commits lock and revalidate
+the connection. The alpha has no force-purge for historical dependencies, so
+operators must keep the broader role or connect a separate dedicated account.
+The same applies to a bridge dependency because bridge retirement is not yet an
+implemented product route; pausing does not remove its content relationship.
+
+## 2026-07-21 — Private availability bases use keyed HMAC
+
+Low-entropy busy intervals cannot be protected by an unkeyed digest against an
+offline database/backup attacker. New preview snapshot and action basis values
+are domain-separated HMAC-SHA-256 using a key derived separately from the active
+installation master key. Personal intervals still never enter durable rows.
+
+Migration compatibility accepts historical pre-release `sha256:` values, but
+new writes are `hmac-sha256:`. Current verification has no multi-key support;
+master-key rotation must disable writes, expire previews, and supersede/
+recompute pending or held actions before resuming. Transparent rotation is a
+TODO, not a present claim.
+
+## 2026-07-21 — MCP is a stdio API adapter with two-key apply
+
+The Planipus Server HTTP API remains the sole machine authority. A separate MCP
+process uses the official MIT TypeScript SDK 1.29.0 and stdio transport, then
+calls only the configured Server API over HTTPS (or loopback HTTP). It contains
+no database/provider/OAuth route. Dedicated `pln_api_` tokens are expiring,
+digest-only, one-time-displayed and scoped `read|propose|apply`.
+
+Read/proposal tools and static resources are the default. Apply tools—including
+`activate_sync_policy`—are registered only when
+`PLANIPUS_MCP_ENABLE_APPLY=true`, and the API independently requires an `apply`
+token. This double gate limits accidental model/tool mutation. Calendar and
+provider text remains untrusted data and cannot grant capability.
+
+Remote Streamable HTTP MCP is deferred. It would require a separate OAuth/
+resource-server, origin/session, rate-limit, ingress and advisory review. The
+stdio process must not be proxied and described as remote MCP. The accepted
+transitive Hono moderate advisory is unreachable only under this stdio-only
+decision and must be reopened before remote transport.
+
+The stdio API deadline is 300 seconds because bounded conflict preview can need
+roughly 160 seconds for 32 availability calendars in four concurrent 20-second
+provider lanes. The client validates only 1–600 seconds. Aborting does not prove
+server cancellation: GET timeout is `api_timeout`; POST/DELETE timeout is
+`api_timeout_outcome_unknown`, requiring current-state inspection before retry.
+
+## 2026-07-21 — Provider-contacting API proposals receive alpha rate guards
+
+The API process limits each organization/actor-kind/session-or-token fixed
+window: read 600/minute, apply 120/minute, and provider-contacting propose 30
+per 10 minutes. It returns safe HTTP 429 `api_rate_limited` with `Retry-After`,
+which the MCP adapter may expose. Conflict preview also counts durable live
+unconsumed rows and refuses a principal at 10 with `preview_rate_limited`.
+
+These controls reduce accidental/provider-inference blast radius in the current
+single-process alpha. They are deliberately not represented as production abuse
+control: request counters reset on restart and are not shared across replicas;
+the preview count is a preflight, not a concurrency-hard quota; and planning/
+public features need their own limits. A shared persistent limiter, concurrency/
+bypass/cardinality matrix, and provider-quota evidence remain release work.
+
+## 2026-07-21 — Live Google invitation response is release-gated
+
+Google apply performs exact event GET and conditional self-attendee PATCH with
+`attendeesOmitted=true`, configured comment, `If-Match`, and
+`sendUpdates=none`. Google documents attendee `responseStatus` propagation, not
+guaranteed organizer delivery of the comment. Planipus deliberately avoids
+broad `sendUpdates=all` guest updates; provider documentation/fixtures still do
+not prove that no mail/calendar notification occurs.
+
+`PLANIPUS_EXPERIMENTAL_GOOGLE_INVITATION_DECLINE` is therefore a strict boolean
+defaulting false. Preview remains available but activation fails while provider
+writes are off; conflict-rule resume fails too. Preview/list/capabilities
+separate provider-write state from message-delivery state; fake mode is
+simulated and Google delivery remains
+unverified even when writes are enabled. Setting true is experimental operator
+consent, not feature promotion; disposable organizer, work-attendee, personal,
+and observer evidence is required before release.
+
+A post-write verification that confirms self RSVP `declined` but does not retain
+the requested attendee comment is still a completed safe RSVP. The action/rule
+reports `decline_comment_not_retained`, the immutable fact consumes budget, and
+Planipus does not repeatedly PATCH an already-declined invitation. This warning
+does not promote message delivery beyond `unverified_google`.
+
 ## 2026-07-21 — Broad Reclaim parity; Calendar Sync remains the release wedge
 
 Planipus is a broad calendar-orchestration product, not permanently a calendar

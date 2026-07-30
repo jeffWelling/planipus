@@ -7,7 +7,7 @@ credential, privacy, and duplicate-safety prerequisites pass.
 
 The product scope is broad Reclaim-class orchestration, but the directed
 calendar bridge remains the release-critical wedge. Protected Hours,
-availability fences, and Smart Meetings are active Server alpha work; they do
+availability fences, Smart Meetings, no-copy conflict response, and API/MCP are active Server alpha work; they do
 not turn an unfinished bridge into a release.
 
 ## E0 — correct the product boundary
@@ -76,6 +76,123 @@ not turn an unfinished bridge into a release.
       contract drift tests, API idempotency keys and public-resource ETags.
 - [!] Run two-account live Google create/update/move/recurrence/delete suite.
 - [!] Verify each privacy preset from an ordinary third-viewer identity.
+
+## S1C — Server API/MCP and no-copy conflict-response alpha
+
+- [x] Add migration 0006 and a dedicated machine credential with one-time
+      plaintext, digest-only storage, `read|propose|apply`, mandatory bounded
+      expiry, revocation/last-use, active membership, tenant binding and audit.
+- [x] Keep token issue/list/revoke owner-browser-only with exact Origin/CSRF;
+      accept bearer only on the documented read/propose/apply routes and reject
+      mixed cookie+bearer credentials.
+- [x] Add official SDK 1.29.0 stdio MCP workspace with strict config/schemas,
+      fixed-origin bounded API client, safe errors, static resources, complete
+      read/propose tools, and opt-in apply tools including
+      `activate_sync_policy`. No DB/provider/OAuth import or remote HTTP transport.
+- [x] Add Google/fake provider free/busy and exact self-attendee decline ports,
+      conditional revision, configured comment, quiet-update request,
+      idempotent exact result and ambiguous-write verification.
+- [x] Add strict-private Google `availability` role with CalendarList/free-busy
+      only and exclude it from event sync. Require visible reauthorization for
+      old source/both connections that lack free-busy. Reject any returned
+      broader Calendar grant as `oauth_scope_overbroad`, requiring Google-side
+      revoke/reconnect; reject an omitted returned set as
+      `oauth_scope_unverified`; serialize first-connect/reauthorization by subject.
+- [x] Add conflict preview/rule/action schema, strict bounded draft, time-only
+      preview, stale-bound activation, durable reconcile/apply, fresh exact-
+      interval free/busy, and exact invitation eligibility/revision recheck.
+- [x] Fail closed for organizer, accepted, tentative, cancelled, missing/unknown
+      self, all-day, started, changed and no-longer-conflicting events. A pending
+      action already declined at exact initial GET is applied without PATCH,
+      budgeted, and warned when its comment differs. Never auto-accept/undo on
+      pause/removal.
+- [x] Protect every selected private availability calendar from active bridges
+      as either endpoint and reject inbound copies even from paused bridges.
+      Conflict and bridge mutations use stable side-specific errors and shared
+      tenant/calendar advisory locks over all endpoints. An outbound bridge may
+      pause first, but its existing managed copies remain disclosed.
+- [x] Persist canonical sync-policy and protected-availability provider-calendar
+      identities. Treat Google calendar IDs as global across aliases, reject
+      alias self-copy/duplicate selection, close alias no-copy races, and
+      quarantine/audit historical self-copy work while preserving copies.
+- [x] Add domain-separated private-availability HMACs, indexed 15-minute-fresh/
+      5,000-row-bounded invitation candidates, one durable response-provider
+      controller, a historical 20-per-24-hour budget counted from immutable
+      verified-decline audit facts, and idempotent rule retire through API/MCP.
+- [x] Treat a provider-verified RSVP decline with an unretained comment as
+      applied-with-warning `decline_comment_not_retained`; consume budget and do
+      not retry a confirmed decline merely to chase comment persistence. Treat
+      Google write 5xx/response-read failure as ambiguous and exact-GET verify.
+- [x] Make event-content `readable` distinct from
+      `capabilities.freebusy_readable`; implement atomic source/both → no-event-
+      read reauthorization that blocks dependencies, purges observations/cursors,
+      retires subscriptions/jobs, restricts endpoints, audits counts, and closes
+      the in-flight sync finalization race.
+- [x] Enqueue conflict-rule reconciliation immediately after successful work
+      response-calendar sync; retain the 15-minute scheduler as safety fallback.
+- [x] Add Server Private replies and Settings/API-token/MCP surfaces with zero-
+      copy and provider-delivery caveats. Prefer the `availability` role and
+      warn truthfully when source/both has broader persisted bridge data.
+- [x] Keep Google invitation responses disabled by default behind
+      `PLANIPUS_EXPERIMENTAL_GOOGLE_INVITATION_DECLINE=false`; fake provider may
+      exercise simulated response logic. Expose separate write/message state and
+      refuse Google activation while the write gate is off.
+- [x] Add single-process per-actor API windows (read 600/minute, apply
+      120/minute, propose 30/10 minutes), safe 429/`Retry-After`, MCP error
+      allowlisting, and a 10-live-conflict-preview/principal database preflight.
+- [x] Set the MCP API deadline to 300 seconds for bounded provider fan-out and
+      distinguish retryable read timeout from unknown-outcome POST/DELETE,
+      requiring state inspection before mutation retry.
+- [~] Focused MCP/API/engine/provider/OAuth/config/migration tests exist, and the
+      opt-in PostgreSQL suite now covers 0001–0014, conflict preview/activate/
+      apply, canonical alias rejection/no-copy checks, and an alias-aware bridge-
+      versus-protected-calendar activation race. Run and record the post-edit
+      consolidated gate, a seeded 0013→0014 quarantine upgrade, then add
+      scheduler/worker fault/restore lifecycle; do not inherit earlier counts.
+- [!] Inspect SQL, jobs, audit, logs, metrics, API/MCP and backup for forbidden
+      personal event identity/content. Prove availability-only connections are
+      never event-synced.
+- [!] Run disposable Google organizer/work-attendee/personal/observer matrix for
+      comment visibility, actual mail/calendar notifications with
+      `sendUpdates=none`, recurring instances, concurrent RSVP/time changes,
+      ambiguity, preconditions, quota/auth, pause/restore and cleanup.
+- [ ] Add complete conflict-rule edit/retention/export, held-action repair,
+      privacy-safe health/metrics/alerts and restore/token-rotation runbook drills.
+- [ ] Add real-PostgreSQL role-downgrade coverage for every live/historical
+      dependency, exact purge/audit counts, and in-flight sync races. Until a
+      previewed historical projection/action purge exists, keep
+      `availability_role_change_blocked` fail closed and recommend a distinct
+      dedicated availability account.
+- [ ] Run live Google old-grant revocation, availability-only reconnect, returned-
+      scope inspection, and downgrade/purge proof. Unit scope rejection is not
+      evidence that Google actually removed the broader grant.
+- [ ] Add a previewed, audited bridge cleanup/retirement flow that can detach or
+      remove older owned copies and projections after pausing. No-copy setup may
+      proceed after pause today, but must disclose that existing copies remain.
+- [x] Lease one scheduled job and one outbox effect per worker loop; renew the
+      scheduled job every lease/3 plus immediately before terminal transition;
+      leave state to the current owner and keep serving after lease loss.
+- [ ] Move conflict activation free/busy and coordinator provider I/O outside
+      open row/advisory-lock transactions; prove bounded lock duration, worker
+      shutdown, retry, ambiguity recovery, and convergence when an uncancellable
+      in-flight provider call outlives lease ownership.
+- [ ] Add versioned/multi-key verification for private HMAC bases and an
+      automated rotation workflow. Until then, expire previews and supersede/
+      recompute pending/held actions under a writes-disabled maintenance window.
+- [ ] Consider a narrower machine scope for conflict preview. Current `propose`
+      can contact providers and infer private busy/work-invitation time overlaps,
+      so it is not a low-sensitivity read-only capability.
+- [ ] Replace process-local actor counters with a shared persistent limiter and
+      make the 10-live-preview cap concurrency-hard. Test restart/replica/
+      credential bypass, bounded key cardinality, read/apply windows, and add
+      planning/public-specific abuse controls before Internet production.
+- [ ] Exercise the stdio adapter against a real packaged Server from supported
+      MCP hosts; add current online vulnerability evidence and track the accepted
+      stdio-unreachable Hono moderate advisory until the SDK graph is fixed.
+- [ ] If remote Streamable HTTP is desired, write a new auth/resource-server/
+      deployment/security ADR first; do not proxy the stdio process.
+- [ ] Keep every part Server-only. A Mac version needs separate native product,
+      security, provider, lifecycle and release acceptance.
 
 ## S1P — Server Protected Hours and Smart Meetings alpha
 

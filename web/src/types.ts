@@ -12,6 +12,7 @@ export interface CalendarEndpoint {
   name: string;
   primary: boolean;
   readable: boolean;
+  freeBusyReadable: boolean;
   writable: boolean;
   timeZone: string;
 }
@@ -20,7 +21,7 @@ export interface Connection {
   id: string;
   label: string;
   maskedEmail: string;
-  role: "source" | "destination" | "both";
+  role: "availability" | "source" | "destination" | "both";
   status: "connected" | "attention" | "revoked";
   lastSuccessAt?: string;
   calendars: CalendarEndpoint[];
@@ -86,6 +87,71 @@ export interface Capabilities {
   calendarBridges: "alpha" | "unavailable";
   availabilityProtection: "alpha" | "unavailable";
   smartMeetings: "alpha" | "unavailable";
+  conflictAutoDecline: "alpha" | "unavailable";
+  conflictAutoDeclineProviderWrites: boolean;
+  conflictDeclineMessageDelivery: "simulated" | "unverified_google";
+  apiServer: "alpha" | "unavailable";
+  mcpServer: "alpha" | "unavailable";
+}
+
+export interface ConflictResponseDraft {
+  name: string;
+  response_calendar_id: string;
+  availability_calendar_ids: string[];
+  decline_message: string;
+  horizon_days: number;
+}
+
+export interface ConflictResponsePreview {
+  previewToken: string;
+  expiresAt: string;
+  invitationCount: number;
+  conflictCount: number;
+  heldCount: number;
+  budgetHeldCount: number;
+  examples: Array<{
+    startAt: string;
+    endAt: string;
+  }>;
+  warnings: string[];
+  providerWritesEnabled: boolean;
+  messageDelivery: "simulated" | "unverified_google";
+}
+
+export interface ConflictResponseRule {
+  id: string;
+  name: string;
+  status: "active" | "paused";
+  responseCalendarId: string;
+  responseCalendarName?: string;
+  availabilityCalendarIds: string[];
+  availabilityCalendarCount: number;
+  declineMessage: string;
+  horizonDays: number;
+  pendingCount: number;
+  declinedCount: number;
+  heldCount: number;
+  providerWritesEnabled: boolean;
+  messageDelivery: "simulated" | "unverified_google";
+  lastEvaluatedAt?: string;
+  lastSuccessAt?: string;
+  safeErrorCode?: string;
+}
+
+export type ApiTokenScope = "read" | "propose" | "apply";
+
+export interface ApiTokenSummary {
+  id: string;
+  label: string;
+  scopes: ApiTokenScope[];
+  createdAt: string;
+  expiresAt?: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
+}
+
+export interface CreatedApiToken extends ApiTokenSummary {
+  token: string;
 }
 
 export interface AvailabilityBoundaryDraft {

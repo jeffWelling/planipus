@@ -14,6 +14,8 @@ existingSecret: planipus-secrets
 config:
   publicUrl: https://planipus.example.invalid
   providerMode: fake
+  experimentalGooglePlanning: false
+  experimentalGoogleInvitationDecline: false
   masterKeyId: cluster-v1
   sessionTtlSeconds: 43200
   schedulerIntervalMs: 15000

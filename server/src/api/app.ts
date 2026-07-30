@@ -7,8 +7,7 @@ import swagger from "@fastify/swagger";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
-  type FastifyRequest,
-  type preHandlerHookHandler
+  type FastifyRequest
 } from "fastify";
 import { sql, type Kysely } from "kysely";
 import { collectDefaultMetrics, Counter, Histogram, Registry } from "prom-client";
@@ -18,9 +17,16 @@ import {
   SessionService,
   type AuthenticatedSession
 } from "../auth/session.js";
+import {
+  ApiTokenInputError,
+  ApiTokenService,
+  hasApiScope,
+  type ApiTokenScope,
+  type AuthenticatedApiToken
+} from "../auth/api-token.js";
 import type { ServerConfig } from "../config.js";
 import type { DatabaseSchema } from "../database/types.js";
-import { safeErrorCode } from "../foundation.js";
+import { isUuid, safeErrorCode } from "../foundation.js";
 import { PostgresJobQueue } from "../jobs/queue.js";
 import { PolicyInputError, PolicyService, type PolicyDraft } from "../policy/service.js";
 import {
@@ -31,11 +37,19 @@ import {
   PlanningInputError,
   PlanningService
 } from "../planning/service.js";
+import {
+  ConflictResponseService
+} from "../conflict-response/service.js";
+import {
+  ConflictResponseInputError,
+  parseConflictResponseDraft
+} from "../conflict-response/validation.js";
 
 export interface ApiDependencies {
   readonly config: ServerConfig;
   readonly db: Kysely<DatabaseSchema>;
   readonly sessions: Pick<SessionService, "exchangeBootstrapToken" | "authenticate" | "revoke">;
+  readonly apiTokens?: Pick<ApiTokenService, "authenticate" | "issue" | "list" | "revoke">;
   readonly policies: Pick<PolicyService, "preview" | "activate" | "list" | "setPaused" | "retryBlocked" | "requestReconcile">;
   readonly googleOAuth?: Pick<GoogleOAuthService, "begin" | "complete">;
   readonly planning?: Pick<PlanningService,
@@ -46,6 +60,14 @@ export interface ApiDependencies {
     | "resolveSuggestion"
     | "setPaused"
     | "requestReplan"
+    | "remove"
+  >;
+  readonly conflictResponses?: Pick<ConflictResponseService,
+    | "preview"
+    | "activate"
+    | "list"
+    | "setPaused"
+    | "requestReconcile"
     | "remove"
   >;
   readonly webRoot?: string;
@@ -134,15 +156,44 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
     return payload;
   });
 
-  const authenticated = new WeakMap<FastifyRequest, AuthenticatedSession>();
+  type AuthenticatedActor =
+    | {
+      readonly kind: "browser_session";
+      readonly principalId: string;
+      readonly organizationId: string;
+      readonly session: AuthenticatedSession;
+    }
+    | {
+      readonly kind: "api_token";
+      readonly principalId: string;
+      readonly organizationId: string;
+      readonly token: AuthenticatedApiToken;
+    };
+  const authenticatedSessions = new WeakMap<FastifyRequest, AuthenticatedSession>();
+  const authenticatedActors = new WeakMap<FastifyRequest, AuthenticatedActor>();
   const bootstrapAttempts = new Map<string, { count: number; resetAt: number }>();
-  const requireSession: preHandlerHookHandler = async (request, reply) => {
+  const actorRequests = new Map<string, { count: number; resetAt: number }>();
+  const requireSession = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    if (request.headers.authorization !== undefined) {
+      const mixed = request.cookies[SESSION_COOKIE] !== undefined;
+      await reply.code(mixed ? 400 : 401).send(errorDocument(
+        mixed ? "ambiguous_credentials" : "browser_session_required",
+        request.id
+      ));
+      return;
+    }
     const session = await dependencies.sessions.authenticate(request.cookies[SESSION_COOKIE]);
     if (!session) {
       await reply.code(401).send(errorDocument("authentication_required", request.id));
       return;
     }
-    authenticated.set(request, session);
+    authenticatedSessions.set(request, session);
+    authenticatedActors.set(request, {
+      kind: "browser_session",
+      principalId: session.principalId,
+      organizationId: session.organizationId,
+      session
+    });
   };
   const requireOrigin = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     if (request.headers.origin !== dependencies.config.publicUrl.origin) {
@@ -150,12 +201,98 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
     }
   };
   const sessionFor = (request: FastifyRequest): AuthenticatedSession => {
-    const session = authenticated.get(request);
+    const session = authenticatedSessions.get(request);
     if (!session) {
       throw new Error("authenticated session was not installed");
     }
     return session;
   };
+  const actorFor = (request: FastifyRequest): AuthenticatedActor => {
+    const actor = authenticatedActors.get(request);
+    if (!actor) throw new Error("authenticated actor was not installed");
+    return actor;
+  };
+  const actorTokenId = (actor: AuthenticatedActor): string | null =>
+    actor.kind === "api_token" ? actor.token.tokenId : null;
+  const requireActor = (scope: ApiTokenScope) => async (
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> => {
+    const authorization = request.headers.authorization;
+    if (authorization !== undefined) {
+      if (request.cookies[SESSION_COOKIE] !== undefined) {
+        await reply.code(400).send(errorDocument("ambiguous_credentials", request.id));
+        return;
+      }
+      const candidate = bearerCredential(authorization);
+      const token = candidate ? await dependencies.apiTokens?.authenticate(candidate) : null;
+      if (!token) {
+        reply.header("www-authenticate", "Bearer");
+        await reply.code(401).send(errorDocument("authentication_required", request.id));
+        return;
+      }
+      if (!hasApiScope(token.scopes, scope)) {
+        await reply.code(403).send(errorDocument("insufficient_scope", request.id));
+        return;
+      }
+      authenticatedActors.set(request, {
+        kind: "api_token",
+        principalId: token.principalId,
+        organizationId: token.organizationId,
+        token
+      });
+      await enforceActorRateLimit(request, reply, scope);
+      return;
+    }
+    await requireSession(request, reply);
+    if (!reply.sent) await enforceActorRateLimit(request, reply, scope);
+  };
+  const enforceActorRateLimit = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    scope: ApiTokenScope
+  ): Promise<void> => {
+    const actor = actorFor(request);
+    const identity = actor.kind === "api_token" ? actor.token.tokenId : actor.session.sessionId;
+    const rule = scope === "propose"
+      ? { maximum: 30, windowMilliseconds: 10 * 60_000 }
+      : scope === "apply"
+        ? { maximum: 120, windowMilliseconds: 60_000 }
+        : { maximum: 600, windowMilliseconds: 60_000 };
+    const key = `${scope}:${actor.organizationId}:${actor.kind}:${identity}`;
+    const now = Date.now();
+    const current = actorRequests.get(key);
+    const next = !current || current.resetAt <= now
+      ? { count: 1, resetAt: now + rule.windowMilliseconds }
+      : { count: current.count + 1, resetAt: current.resetAt };
+    actorRequests.set(key, next);
+    if (actorRequests.size > 10_000) {
+      for (const [candidate, value] of actorRequests) {
+        if (value.resetAt <= now) actorRequests.delete(candidate);
+      }
+    }
+    if (next.count > rule.maximum) {
+      reply.header("retry-after", String(Math.max(1, Math.ceil((next.resetAt - now) / 1_000))));
+      await reply.code(429).send(errorDocument("api_rate_limited", request.id));
+    }
+  };
+  const mutationOriginAndCsrf = async (
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> => {
+    if (request.headers.authorization !== undefined) return;
+    await requireOrigin(request, reply);
+    if (!reply.sent) app.csrfProtection(request, reply, () => undefined);
+  };
+  const protectedProposal = {
+    onRequest: mutationOriginAndCsrf,
+    preHandler: requireActor("propose")
+  };
+  const protectedApply = {
+    onRequest: mutationOriginAndCsrf,
+    preHandler: requireActor("apply")
+  };
+  const protectedRead = { preHandler: requireActor("read") };
   const protectedMutation = {
     onRequest: [requireOrigin, app.csrfProtection],
     preHandler: requireSession
@@ -224,8 +361,61 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
     return reply.code(204).send();
   });
 
-  app.get("/api/v1/connections", { preHandler: requireSession }, async (request) => {
+  app.get("/api/v1/auth/context", protectedRead, async (request) => {
+    const actor = actorFor(request);
+    return {
+      actor_kind: actor.kind,
+      principal_id: actor.principalId,
+      organization_id: actor.organizationId,
+      scopes: actor.kind === "api_token" ? actor.token.scopes : ["read", "propose", "apply"]
+    };
+  });
+  app.get("/api/v1/api-tokens", { preHandler: requireSession }, async (request, reply) => {
+    if (!dependencies.apiTokens) {
+      return reply.code(503).send(errorDocument("api_tokens_unavailable", request.id));
+    }
     const session = sessionFor(request);
+    return dependencies.apiTokens.list(session.organizationId, session.principalId);
+  });
+  app.post<{ Body: unknown }>("/api/v1/api-tokens", protectedMutation, async (request, reply) => {
+    if (!dependencies.apiTokens) {
+      return reply.code(503).send(errorDocument("api_tokens_unavailable", request.id));
+    }
+    if (!hasOnlyKeys(request.body, ["label", "scopes", "expires_in_days"])) {
+      return reply.code(400).send(errorDocument("invalid_api_token", request.id));
+    }
+    const session = sessionFor(request);
+    const issued = await dependencies.apiTokens.issue(session.organizationId, session.principalId, {
+      label: request.body["label"],
+      scopes: request.body["scopes"],
+      expires_in_days: request.body["expires_in_days"]
+    });
+    return reply.code(201).send({
+      id: issued.tokenId,
+      label: issued.label,
+      token: issued.token,
+      scopes: issued.scopes,
+      expires_at: issued.expiresAt.toISOString()
+    });
+  });
+  app.delete<{ Params: { id: string } }>(
+    "/api/v1/api-tokens/:id",
+    protectedMutation,
+    async (request, reply) => {
+      if (!dependencies.apiTokens) {
+        return reply.code(503).send(errorDocument("api_tokens_unavailable", request.id));
+      }
+      if (!isUuid(request.params.id)) {
+        return reply.code(400).send(errorDocument("invalid_api_token", request.id));
+      }
+      const session = sessionFor(request);
+      await dependencies.apiTokens.revoke(session.organizationId, session.principalId, request.params.id);
+      return reply.code(204).send();
+    }
+  );
+
+  app.get("/api/v1/connections", protectedRead, async (request) => {
+    const actor = actorFor(request);
     return dependencies.db
       .selectFrom("provider_connections")
       .select([
@@ -239,7 +429,7 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
         "safe_error_code",
         "updated_at"
       ])
-      .where("organization_id", "=", session.organizationId)
+      .where("organization_id", "=", actor.organizationId)
       .orderBy("created_at", "asc")
       .execute();
   });
@@ -252,7 +442,12 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
       }
       if (
         typeof request.body?.label !== "string"
-        || (request.body.role !== "source" && request.body.role !== "destination" && request.body.role !== "both")
+        || (
+          request.body.role !== "availability"
+          && request.body.role !== "source"
+          && request.body.role !== "destination"
+          && request.body.role !== "both"
+        )
       ) {
         return reply.code(400).send(errorDocument("invalid_connection_intent", request.id));
       }
@@ -285,8 +480,8 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
       return reply.code(303).header("location", "/").send();
     }
   );
-  app.get("/api/v1/calendars", { preHandler: requireSession }, async (request) => {
-    const session = sessionFor(request);
+  app.get("/api/v1/calendars", protectedRead, async (request) => {
+    const actor = actorFor(request);
     return dependencies.db
       .selectFrom("calendar_endpoints")
       .innerJoin("provider_connections", "provider_connections.id", "calendar_endpoints.connection_id")
@@ -297,23 +492,35 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
         "calendar_endpoints.timezone",
         "calendar_endpoints.readable",
         "calendar_endpoints.writable",
+        "calendar_endpoints.capabilities",
         "calendar_endpoints.primary_calendar",
         "provider_connections.provider",
+        "provider_connections.intended_role",
         "provider_connections.email_masked as account"
       ])
-      .where("calendar_endpoints.organization_id", "=", session.organizationId)
+      .where("calendar_endpoints.organization_id", "=", actor.organizationId)
       .orderBy("provider_connections.created_at", "asc")
       .orderBy("calendar_endpoints.name", "asc")
       .execute();
   });
-  app.get("/api/v1/overview", { preHandler: requireSession }, async (request) => {
-    return buildOverviewDocument(dependencies.db, sessionFor(request).organizationId);
+  app.get("/api/v1/overview", protectedRead, async (request) => {
+    return buildOverviewDocument(dependencies.db, actorFor(request).organizationId);
   });
 
-  app.get("/api/v1/capabilities", { preHandler: requireSession }, async () => ({
+  app.get("/api/v1/capabilities", protectedRead, async () => ({
     calendar_bridges: "alpha",
     availability_protection: dependencies.planning ? "alpha" : "unavailable",
-    smart_meetings: dependencies.planning ? "alpha" : "unavailable"
+    smart_meetings: dependencies.planning ? "alpha" : "unavailable",
+    conflict_auto_decline: dependencies.conflictResponses ? "alpha" : "unavailable",
+    conflict_auto_decline_provider_writes: dependencies.conflictResponses
+      ? dependencies.config.providerMode === "fake"
+        || dependencies.config.experimentalGoogleInvitationDecline === true
+      : false,
+    conflict_decline_message_delivery: dependencies.config.providerMode === "fake"
+      ? "simulated"
+      : "unverified_google",
+    api_server: "alpha",
+    mcp_server: "alpha"
   }));
 
   app.post<{ Body: unknown }>("/api/v1/planning/preview", protectedMutation, async (request, reply) => {
@@ -378,50 +585,222 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
     return reply.code(204).send();
   });
 
-  app.post<{ Body: unknown }>("/api/v1/policies/preview", protectedMutation, async (request, reply) => {
+  app.get("/api/v1/conflict-response/rules", protectedRead, async (request, reply) => {
+    if (!dependencies.conflictResponses) {
+      return reply.code(503).send(errorDocument("conflict_response_unavailable", request.id));
+    }
+    return dependencies.conflictResponses.list(actorFor(request).organizationId);
+  });
+  app.post<{ Body: unknown }>(
+    "/api/v1/conflict-response/preview",
+    protectedProposal,
+    async (request, reply) => {
+      if (!dependencies.conflictResponses) {
+        return reply.code(503).send(errorDocument("conflict_response_unavailable", request.id));
+      }
+      const actor = actorFor(request);
+      const draft = parseConflictResponseDraft(request.body);
+      return dependencies.conflictResponses.preview(
+        actor.organizationId,
+        actor.principalId,
+        draft
+      );
+    }
+  );
+  app.post<{ Body: { preview_token?: unknown } }>(
+    "/api/v1/conflict-response/rules",
+    protectedApply,
+    async (request, reply) => {
+      if (!dependencies.conflictResponses) {
+        return reply.code(503).send(errorDocument("conflict_response_unavailable", request.id));
+      }
+      if (!isUuid(request.body?.preview_token)) {
+        return reply.code(400).send(errorDocument("invalid_request", request.id));
+      }
+      const actor = actorFor(request);
+      const rule = await dependencies.conflictResponses.activate(
+        actor.organizationId,
+        actor.principalId,
+        request.body.preview_token,
+        new Date(),
+        actor.kind === "api_token" ? "api_token" : "user",
+        actorTokenId(actor)
+      );
+      return reply.code(201).send(rule);
+    }
+  );
+  app.post<{ Params: { id: string } }>(
+    "/api/v1/conflict-response/rules/:id/pause",
+    protectedApply,
+    async (request, reply) => {
+      if (!dependencies.conflictResponses) {
+        return reply.code(503).send(errorDocument("conflict_response_unavailable", request.id));
+      }
+      if (!isUuid(request.params.id)) {
+        return reply.code(400).send(errorDocument("invalid_request", request.id));
+      }
+      const actor = actorFor(request);
+      await dependencies.conflictResponses.setPaused(
+        actor.organizationId,
+        actor.principalId,
+        request.params.id,
+        true,
+        new Date(),
+        actor.kind === "api_token" ? "api_token" : "user",
+        actorTokenId(actor)
+      );
+      return reply.code(204).send();
+    }
+  );
+  app.post<{ Params: { id: string } }>(
+    "/api/v1/conflict-response/rules/:id/resume",
+    protectedApply,
+    async (request, reply) => {
+      if (!dependencies.conflictResponses) {
+        return reply.code(503).send(errorDocument("conflict_response_unavailable", request.id));
+      }
+      if (!isUuid(request.params.id)) {
+        return reply.code(400).send(errorDocument("invalid_request", request.id));
+      }
+      const actor = actorFor(request);
+      await dependencies.conflictResponses.setPaused(
+        actor.organizationId,
+        actor.principalId,
+        request.params.id,
+        false,
+        new Date(),
+        actor.kind === "api_token" ? "api_token" : "user",
+        actorTokenId(actor)
+      );
+      return reply.code(204).send();
+    }
+  );
+  app.post<{ Params: { id: string } }>(
+    "/api/v1/conflict-response/rules/:id/reconcile",
+    protectedApply,
+    async (request, reply) => {
+      if (!dependencies.conflictResponses) {
+        return reply.code(503).send(errorDocument("conflict_response_unavailable", request.id));
+      }
+      if (!isUuid(request.params.id)) {
+        return reply.code(400).send(errorDocument("invalid_request", request.id));
+      }
+      const actor = actorFor(request);
+      const job = await dependencies.conflictResponses.requestReconcile(
+        actor.organizationId,
+        request.params.id,
+        actor.principalId,
+        new Date(),
+        actor.kind === "api_token" ? "api_token" : "user",
+        actorTokenId(actor)
+      );
+      return reply.code(202).send({ enqueued: job !== null, job_id: job });
+    }
+  );
+  app.delete<{ Params: { id: string } }>(
+    "/api/v1/conflict-response/rules/:id",
+    protectedApply,
+    async (request, reply) => {
+      if (!dependencies.conflictResponses) {
+        return reply.code(503).send(errorDocument("conflict_response_unavailable", request.id));
+      }
+      if (!isUuid(request.params.id)) {
+        return reply.code(400).send(errorDocument("invalid_request", request.id));
+      }
+      const actor = actorFor(request);
+      await dependencies.conflictResponses.remove(
+        actor.organizationId,
+        actor.principalId,
+        request.params.id,
+        new Date(),
+        actor.kind === "api_token" ? "api_token" : "user",
+        actorTokenId(actor)
+      );
+      return reply.code(204).send();
+    }
+  );
+
+  app.post<{ Body: unknown }>("/api/v1/policies/preview", protectedProposal, async (request, reply) => {
     const draft = parsePolicyDraft(request.body);
     if (!draft) {
       return reply.code(400).send(errorDocument("invalid_policy", request.id));
     }
-    const session = sessionFor(request);
-    return dependencies.policies.preview(session.organizationId, session.principalId, draft);
+    const actor = actorFor(request);
+    return dependencies.policies.preview(actor.organizationId, actor.principalId, draft);
   });
-  app.post<{ Body: { preview_token?: unknown } }>("/api/v1/policies", protectedMutation, async (request, reply) => {
-    if (typeof request.body?.preview_token !== "string") {
+  app.post<{ Body: { preview_token?: unknown } }>("/api/v1/policies", protectedApply, async (request, reply) => {
+    if (!isUuid(request.body?.preview_token)) {
       return reply.code(400).send(errorDocument("invalid_request", request.id));
     }
-    const session = sessionFor(request);
+    const actor = actorFor(request);
     const policy = await dependencies.policies.activate(
-      session.organizationId,
-      session.principalId,
-      request.body.preview_token
+      actor.organizationId,
+      actor.principalId,
+      request.body.preview_token,
+      actor.kind === "api_token" ? "api_token" : "user",
+      actorTokenId(actor)
     );
     return reply.code(201).send(policy);
   });
-  app.get("/api/v1/policies", { preHandler: requireSession }, async (request) => {
-    return dependencies.policies.list(sessionFor(request).organizationId);
+  app.get("/api/v1/policies", protectedRead, async (request) => {
+    return dependencies.policies.list(actorFor(request).organizationId);
   });
-  app.post<{ Params: { id: string } }>("/api/v1/policies/:id/pause", protectedMutation, async (request, reply) => {
-    const session = sessionFor(request);
-    await dependencies.policies.setPaused(session.organizationId, session.principalId, request.params.id, true);
+  app.post<{ Params: { id: string } }>("/api/v1/policies/:id/pause", protectedApply, async (request, reply) => {
+    if (!isUuid(request.params.id)) {
+      return reply.code(400).send(errorDocument("invalid_request", request.id));
+    }
+    const actor = actorFor(request);
+    await dependencies.policies.setPaused(
+      actor.organizationId,
+      actor.principalId,
+      request.params.id,
+      true,
+      actor.kind === "api_token" ? "api_token" : "user",
+      actorTokenId(actor)
+    );
     return reply.code(204).send();
   });
-  app.post<{ Params: { id: string } }>("/api/v1/policies/:id/resume", protectedMutation, async (request, reply) => {
-    const session = sessionFor(request);
-    await dependencies.policies.setPaused(session.organizationId, session.principalId, request.params.id, false);
+  app.post<{ Params: { id: string } }>("/api/v1/policies/:id/resume", protectedApply, async (request, reply) => {
+    if (!isUuid(request.params.id)) {
+      return reply.code(400).send(errorDocument("invalid_request", request.id));
+    }
+    const actor = actorFor(request);
+    await dependencies.policies.setPaused(
+      actor.organizationId,
+      actor.principalId,
+      request.params.id,
+      false,
+      actor.kind === "api_token" ? "api_token" : "user",
+      actorTokenId(actor)
+    );
     return reply.code(204).send();
   });
-  app.post<{ Params: { id: string } }>("/api/v1/policies/:id/recover", protectedMutation, async (request, reply) => {
-    const session = sessionFor(request);
+  app.post<{ Params: { id: string } }>("/api/v1/policies/:id/recover", protectedApply, async (request, reply) => {
+    if (!isUuid(request.params.id)) {
+      return reply.code(400).send(errorDocument("invalid_request", request.id));
+    }
+    const actor = actorFor(request);
     const retried = await dependencies.policies.retryBlocked(
-      session.organizationId,
-      session.principalId,
-      request.params.id
+      actor.organizationId,
+      actor.principalId,
+      request.params.id,
+      actor.kind === "api_token" ? "api_token" : "user",
+      actorTokenId(actor)
     );
     return reply.code(202).send({ retried });
   });
-  app.post<{ Params: { id: string } }>("/api/v1/policies/:id/reconcile", protectedMutation, async (request, reply) => {
-    const job = await dependencies.policies.requestReconcile(sessionFor(request).organizationId, request.params.id);
+  app.post<{ Params: { id: string } }>("/api/v1/policies/:id/reconcile", protectedApply, async (request, reply) => {
+    if (!isUuid(request.params.id)) {
+      return reply.code(400).send(errorDocument("invalid_request", request.id));
+    }
+    const actor = actorFor(request);
+    const job = await dependencies.policies.requestReconcile(
+      actor.organizationId,
+      request.params.id,
+      actor.principalId,
+      actor.kind === "api_token" ? "api_token" : "user",
+      actorTokenId(actor)
+    );
     return reply.code(202).send({ enqueued: job !== null, job_id: job });
   });
   app.post("/api/v1/sync", protectedMutation, async (request, reply) => {
@@ -434,7 +813,16 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
         .where("organization_id", "=", organizationId)
         .where("status", "=", "active")
         .execute();
-      const sourceCalendarIds = [...new Set(policies.map((policy) => policy.source_calendar_id))];
+      const conflictResponseRules = await transaction
+        .selectFrom("conflict_response_rules")
+        .select(["id", "revision", "response_calendar_id"])
+        .where("organization_id", "=", organizationId)
+        .where("status", "=", "active")
+        .execute();
+      const sourceCalendarIds = [...new Set([
+        ...policies.map((policy) => policy.source_calendar_id),
+        ...conflictResponseRules.map((rule) => rule.response_calendar_id)
+      ])];
       const planningRules = await transaction
         .selectFrom("planning_rules")
         .select(["id", "revision"])
@@ -475,27 +863,46 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
         );
         enqueued += job ? 1 : 0;
       }
+      for (const rule of conflictResponseRules) {
+        const job = await queue.enqueue(
+          organizationId,
+          "reconcile_conflict_response_rule",
+          `conflict-response-rule:${rule.id}:revision:${rule.revision}:manual-sync:${Date.now()}`,
+          { rule_id: rule.id },
+          new Date(),
+          transaction
+        );
+        enqueued += job ? 1 : 0;
+      }
       return {
         enqueued,
         policies: policies.length,
         calendars: sourceCalendarIds.length,
-        planning_rules: planningRules.length
+        planning_rules: planningRules.length,
+        conflict_response_rules: conflictResponseRules.length
       };
     });
     return reply.code(202).send(result);
   });
-  app.get("/api/v1/health/detail", { preHandler: requireSession }, async (request) => {
-    const organizationId = sessionFor(request).organizationId;
-    const [connections, policies, deadEffects, deadJobs] = await Promise.all([
+  app.get("/api/v1/health/detail", protectedRead, async (request) => {
+    const organizationId = actorFor(request).organizationId;
+    const [connections, policies, conflictResponseRules, heldInvitationResponses, deadEffects, deadJobs] = await Promise.all([
       dependencies.db.selectFrom("provider_connections").select(["id", "provider", "email_masked", "status", "safe_error_code", "last_success_at"]).where("organization_id", "=", organizationId).execute(),
       dependencies.db.selectFrom("sync_policies").select(["id", "name", "status", "safe_error_code", "last_success_at"]).where("organization_id", "=", organizationId).where("status", "!=", "deleted").execute(),
+      dependencies.db.selectFrom("conflict_response_rules").select(["id", "name", "status", "safe_error_code", "last_success_at"]).where("organization_id", "=", organizationId).where("status", "!=", "deleted").execute(),
+      dependencies.db.selectFrom("invitation_response_actions").select(({ fn }) => fn.countAll<number>().as("count")).where("organization_id", "=", organizationId).where("status", "=", "held").executeTakeFirstOrThrow(),
       dependencies.db.selectFrom("outbox_effects").select(({ fn }) => fn.countAll<number>().as("count")).where("organization_id", "=", organizationId).where("state", "=", "dead").executeTakeFirstOrThrow(),
       dependencies.db.selectFrom("scheduled_jobs").select(({ fn }) => fn.countAll<number>().as("count")).where("organization_id", "=", organizationId).where("state", "=", "dead").executeTakeFirstOrThrow()
     ]);
     return {
       connections,
       policies,
-      queues: { dead_effects: Number(deadEffects.count), dead_jobs: Number(deadJobs.count) }
+      conflict_response_rules: conflictResponseRules,
+      queues: {
+        held_invitation_responses: Number(heldInvitationResponses.count),
+        dead_effects: Number(deadEffects.count),
+        dead_jobs: Number(deadJobs.count)
+      }
     };
   });
 
@@ -519,8 +926,40 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
 
   app.setErrorHandler(async (error, request, reply) => {
     const code = safeErrorCode(error);
+    if (error instanceof ApiTokenInputError) {
+      const status = error.code === "not_found"
+        ? 404
+        : error.code === "authorization_required"
+          ? 403
+          : 400;
+      return reply.code(status).send(errorDocument(error.code, request.id));
+    }
+    if (error instanceof ConflictResponseInputError) {
+      if (error.code === "preview_rate_limited") {
+        reply.header("retry-after", "60");
+        return reply.code(429).send(errorDocument(error.code, request.id));
+      }
+      const status = error.code === "not_found"
+        ? 404
+        : error.code === "preview_stale"
+          || error.code === "rule_paused"
+          || error.code === "copy_policy_conflict"
+          || error.code === "response_sync_incomplete"
+          || error.code === "invitation_writes_disabled"
+          || error.code === "response_rule_conflict"
+          || error.code === "availability_copy_feedback"
+            ? 409
+            : error.retryable
+              ? 503
+              : 400;
+      return reply.code(status).send(errorDocument(error.code, request.id));
+    }
     if (error instanceof PolicyInputError) {
-      const status = error.code === "not_found" ? 404 : error.code === "preview_stale" ? 409 : 400;
+      const status = error.code === "not_found"
+        ? 404
+        : error.code === "preview_stale" || error.code === "no_copy_rule_conflict"
+          ? 409
+          : 400;
       return reply.code(status).send(errorDocument(error.code, request.id));
     }
     if (error instanceof PlanningInputError) {
@@ -586,6 +1025,7 @@ async function buildOverviewDocument(db: Kysely<DatabaseSchema>, organizationId:
         "timezone",
         "readable",
         "writable",
+        "capabilities",
         "primary_calendar"
       ])
       .where("organization_id", "=", organizationId)
@@ -701,6 +1141,7 @@ async function buildOverviewDocument(db: Kysely<DatabaseSchema>, organizationId:
           timezone: calendar.timezone,
           readable: calendar.readable,
           writable: calendar.writable,
+          capabilities: calendar.capabilities,
           primary_calendar: calendar.primary_calendar
         }))
     })),
@@ -845,6 +1286,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function hasOnlyKeys(value: unknown, allowed: readonly string[]): value is Record<string, unknown> {
+  return isRecord(value) && Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function bearerCredential(authorization: string): string | null {
+  const match = /^Bearer ([A-Za-z0-9_-]+)$/.exec(authorization);
+  return match?.[1] ?? null;
+}
+
 function parsePolicyDraft(value: unknown): PolicyDraft | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -858,10 +1308,8 @@ function parsePolicyDraft(value: unknown): PolicyDraft | null {
     typeof draft["name"] !== "string"
     || draft["name"].normalize("NFC").trim().length < 1
     || draft["name"].normalize("NFC").trim().length > 120
-    || typeof draft["source_calendar_id"] !== "string"
-    || draft["source_calendar_id"].length < 1
-    || typeof draft["destination_calendar_id"] !== "string"
-    || draft["destination_calendar_id"].length < 1
+    || !isUuid(draft["source_calendar_id"])
+    || !isUuid(draft["destination_calendar_id"])
     || !isPrivacyPolicy(draft["privacy"])
     || !isSelectionPolicy(draft["selection"])
     || (hours !== undefined && (
@@ -870,7 +1318,7 @@ function parsePolicyDraft(value: unknown): PolicyDraft | null {
         && hours["mode"] !== "overlaps_profile"
         && hours["mode"] !== "contained_in_profile")
     ))
-    || (hoursProfileId !== undefined && hoursProfileId !== null && typeof hoursProfileId !== "string")
+    || (hoursProfileId !== undefined && hoursProfileId !== null && !isUuid(hoursProfileId))
     || (inlineHoursProfile !== undefined && !isRecord(inlineHoursProfile))
     || (horizon !== undefined && (
       !isRecord(horizon)
@@ -937,8 +1385,36 @@ function errorDocument(
 function safeMessage(code: string): string {
   const messages: Readonly<Record<string, string>> = {
     authentication_required: "Sign in to continue.",
+    browser_session_required: "Use the Planipus browser session for this action.",
+    ambiguous_credentials: "Use either a browser session or an API token, not both.",
+    insufficient_scope: "This API token does not allow that action.",
+    api_tokens_unavailable: "API tokens are not available in this installation.",
+    invalid_api_token: "The API token settings are invalid.",
+    authorization_required: "You are not allowed to perform that action.",
+    conflict_response_unavailable: "Private conflict responses are not available in this installation.",
+    invalid_conflict_response_rule: "The private conflict response settings are invalid.",
+    response_sync_incomplete: "Let the work calendar finish syncing, then preview again.",
+    response_calendar_unavailable: "Choose an active work calendar connected for reading and writing.",
+    availability_calendar_unavailable: "Choose an active readable availability calendar.",
+    availability_scope_missing: "Reconnect this account so Planipus can request Google's free/busy-only permission.",
+    same_provider_calendar: "Choose different provider calendars for work responses and private availability.",
+    calendar_not_found: "One of the selected calendars is no longer available.",
+    copy_policy_conflict: "Pause every active bridge that copies from the selected private calendar before enabling no-copy responses.",
+    no_copy_rule_conflict: "A calendar protected for private availability cannot participate in a calendar bridge.",
+    connection_role_changed: "Reconnect the calendar with the role required by this bridge, then reconcile it.",
+    invitation_writes_disabled: "Enable experimental Google invitation declines before activating this rule.",
+    automatic_decline_budget_exceeded: "Planipus held additional declines after reaching the 24-hour safety budget.",
+    response_rule_conflict: "This work calendar already has a private conflict response rule.",
+    availability_copy_feedback: "Remove inbound bridge copies from this availability calendar before using it for automatic declines.",
+    rule_paused: "Resume this private conflict response before reconciling it.",
+    freebusy_incomplete: "The calendar provider returned incomplete availability.",
+    freebusy_invalid: "The calendar provider returned invalid availability.",
+    freebusy_bounds_invalid: "The calendar provider returned availability for the wrong time window.",
+    preview_rate_limited: "Too many private conflict previews are still active. Wait for one to expire or activate it.",
+    freebusy_too_large: "The calendar provider returned too many availability intervals to evaluate safely.",
     origin_rejected: "The request origin was rejected.",
     bootstrap_rate_limited: "Too many sign-in attempts. Try again later.",
+    api_rate_limited: "Too many API requests. Wait briefly and try again.",
     bootstrap_rejected: "The bootstrap token was not accepted.",
     invalid_request: "The request is invalid.",
     invalid_policy: "The sync policy is invalid.",
@@ -950,6 +1426,10 @@ function safeMessage(code: string): string {
     google_not_configured: "Google Calendar is not configured for this installation.",
     oauth_denied: "Google authorization was cancelled.",
     oauth_callback_invalid: "The Google authorization response is invalid.",
+    oauth_scope_incomplete: "Google did not grant every requested calendar capability.",
+    oauth_scope_overbroad: "Google retained broader calendar access. Revoke the prior grant, then reconnect as availability-only.",
+    oauth_scope_unverified: "Google did not report the availability grant. Revoke Planipus access, then reconnect as availability-only.",
+    availability_role_change_blocked: "Remove bridges, planning rules, or reply rules that still need this account's event access, then reconnect it as availability-only.",
     preview_stale: "The preview is no longer current.",
     not_found: "The requested item was not found.",
     web_not_built: "The Planipus web app has not been built yet.",
