@@ -3,7 +3,9 @@ import SwiftUI
 
 @main
 struct PlanipusApp: App {
+    @NSApplicationDelegateAdaptor(PlanipusAppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
+    @StateObject private var presentation = PresentationModeController()
 
     var body: some Scene {
         WindowGroup("Planipus", id: "main") {
@@ -27,9 +29,21 @@ struct PlanipusApp: App {
         }
         .windowResizability(.contentMinSize)
 
-        MenuBarExtra("Planipus", systemImage: "calendar.badge.clock") {
+        MenuBarExtra(
+            "Planipus",
+            systemImage: "calendar.badge.clock",
+            isInserted: Binding(
+                get: { presentation.statusItemVisible },
+                // The menu-bar item is removed only by choosing Dock Only in
+                // Settings, which keeps the Dock icon. Nothing else may drop
+                // it, because in Menu Bar Only it is the sole indication that
+                // sync is still running.
+                set: { _ in }
+            )
+        ) {
             MenuBarContent()
                 .environmentObject(model)
+                .environmentObject(presentation)
         }
         .menuBarExtraStyle(.window)
     }
