@@ -32,6 +32,7 @@ available.
 | No-copy conflict response | `POST /api/v1/conflict-response/preview`, `GET`/`POST`/`DELETE /api/v1/conflict-response/rules[/{id}]`, `POST /api/v1/conflict-response/rules/{id}/pause`, `/resume`, `/reconcile` |
 | Alpha planning | `POST /api/v1/planning/preview`, `POST`/`GET /api/v1/planning/rules`, `POST /api/v1/planning/rules/{id}/pause`, `/resume`, `/replan`, `DELETE /api/v1/planning/rules/{id}`, `GET /api/v1/planning/suggestions`, `POST /api/v1/planning/suggestions/{id}/accept`, `/dismiss` |
 | Manual work | `POST /api/v1/sync` |
+| Sync notices | `GET /api/v1/notices`, `POST /api/v1/notices/{id}/acknowledge`, `POST /api/v1/notices/{id}/resolve` |
 | Operations | `GET /api/health/live`, `/startup`, `/ready`; authenticated `GET /api/v1/health/detail` and `GET /api/metrics`; `GET /api/openapi.json` |
 
 The current policy draft embeds a new hours profile in `hours_profile`; activation
@@ -356,9 +357,30 @@ safe error class. They do not expose source fields suppressed by the policy.
 
 States are `pending_create`, `active`, `pending_update`, `pending_delete`,
 `excluded`, `detached`, `conflict`, `action_required`, and `deleted`. Reconcile is
-idempotent. Deleting a managed copy externally normally queues recreation;
-removing the source or excluding it queues deletion. These semantics are defined
-fully in `CALENDAR-SYNC.md`.
+idempotent. Deleting or editing a managed copy externally follows the policy's
+destination-edit behavior (restore silently, restore with a notice, or hold for
+an explicit decision); removing the source or excluding it queues deletion.
+These semantics are defined fully in `CALENDAR-SYNC.md`.
+
+## Sync notices (implemented)
+
+Destination verification records user-facing notices when a managed copy was
+edited or deleted directly, per the policy's `destination_edits` modes:
+
+- `GET /api/v1/notices` — open notices by default; `?scope=all` includes
+  resolved ones. Each notice carries kind, status, policy/projection
+  references, destination calendar label and event ID, a `requires_decision`
+  flag, and a detail document restricted to the copy's privacy-transformed
+  summary/timing;
+- `POST /api/v1/notices/{id}/acknowledge` — returns 204; idempotent;
+- `POST /api/v1/notices/{id}/resolve` — body
+  `{ "action": "restore" | "keep_and_detach" }`, only for held kinds; returns
+  HTTP 202. `restore` replays the validated recovery evidence as a
+  marker-verified ambiguous intent; `keep_and_detach` keeps the person's direct
+  change and detaches the copy. A stale hold returns HTTP 409 `hold_stale`
+  after scheduling a fresh reconciliation where needed.
+
+`GET /api/v1/overview` additionally reports `open_notice_count`.
 
 ## No-copy conflict-response rules
 

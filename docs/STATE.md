@@ -81,6 +81,24 @@ continuously only while its own Kubernetes workload is healthy.
   deleted copies under a fresh deterministic generation, and holds every marker
   mismatch without writing. Explicit UI/API recovery rechecks held copies before
   retrying; repeated intent payloads remain distinct through a monotonic sequence.
+- Configurable per-policy destination-edit behavior (`destination_edits`):
+  direct edits/deletions of managed copies restore with a recorded sync notice
+  by default, restore silently, or hold untouched for an explicit
+  restore/keep-and-detach decision through the notices API
+  (`GET /api/v1/notices`, acknowledge, resolve). Holds keep the person's direct
+  change in place, survive safety reconciliation, and resolve only through
+  marker-verified ambiguous recovery or detach. The React overview renders
+  open notices with the same decide-or-dismiss actions. Email delivery of
+  notices is a planned design (`NOTIFICATIONS.md`), not implemented.
+- The Mac edition implements the same destination-edit modes in its
+  coordinator and stores (schema 6 adds hold/detach columns and a local
+  `sync_notices` table): direct edits of owned copies — previously adopted
+  silently by revision refresh — now restore with a notice by default, and
+  holds freeze the copy until `resolveNotice(restore | keepAndDetach)`.
+  Mac notices have coordinator/store APIs and tests but no menu-bar UI yet,
+  and the updated Swift suite has not been run in this Linux worktree (no
+  Swift toolchain); running `swift test --package-path macos` on a Mac is a
+  required verification step before relying on the Mac slice.
 - A responsive React interface for bootstrap login, labeled account
   connections, source/destination selection, work-hours and privacy policy,
   disclosure preview, activation, health, activity, and Sync Now. The Server

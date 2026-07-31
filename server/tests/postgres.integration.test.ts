@@ -32,6 +32,7 @@ import {
 } from "../src/providers/types.js";
 import { CalendarSyncCoordinator } from "../src/sync/coordinator.js";
 import { EffectExecutor, managedEventId } from "../src/sync/effects.js";
+import { NoticeService } from "../src/sync/notices.js";
 import { calendarSyncQueryFingerprint } from "../src/sync/query.js";
 import { PolicyReconciler } from "../src/sync/reconciliation.js";
 import {
@@ -1365,6 +1366,20 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
         new Date()
       );
       expect(driftSummary).toMatchObject({ claimed: 1, repairsScheduled: 1, held: 0 });
+      // The default destination-edit behavior repairs the copy AND records a
+      // user-facing notice, so a person who moved the copy by mistake learns
+      // the real meeting did not move.
+      const editRevertNotice = await database
+        .selectFrom("sync_notices")
+        .select(["kind", "status", "policy_id", "detail"])
+        .where("projection_id", "=", projection.id)
+        .where("kind", "=", "copy_edit_reverted")
+        .executeTakeFirstOrThrow();
+      expect(editRevertNotice).toMatchObject({ status: "unread", policy_id: activated.id });
+      expect(editRevertNotice.detail).toMatchObject({
+        observed: "drifted",
+        copy_summary: "Busy"
+      });
 
       // The copy can disappear after verification reads it but before the
       // queued update reaches Google. The stale update must not reuse the
@@ -1424,6 +1439,15 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
         new Date()
       );
       expect(missingSummary).toMatchObject({ claimed: 1, repairsScheduled: 1, held: 0 });
+      await expect(database
+        .selectFrom("sync_notices")
+        .select(["status", "detail"])
+        .where("projection_id", "=", projection.id)
+        .where("kind", "=", "copy_delete_restored")
+        .executeTakeFirstOrThrow()).resolves.toMatchObject({
+          status: "unread",
+          detail: expect.objectContaining({ observed: "missing" })
+        });
       const replacementProjection = await database
         .selectFrom("projections")
         .select(["generation", "destination_event_id", "desired_hash", "desired_state", "status"])
@@ -1717,6 +1741,166 @@ describe.skipIf(TEST_DATABASE_URL === null)("PostgreSQL policy integration", () 
         .execute();
       expect(oscillatingEffects).toHaveLength(4);
       expect(new Set(oscillatingEffects.map((effect) => effect.idempotency_key)).size).toBe(4);
+
+      // Destination-edit configuration: hold_for_review keeps a direct edit of
+      // the managed copy untouched, records a decision notice, survives safety
+      // reconciles, and resolves only through an explicit restore or detach.
+      while (await effects.runBatch("postgres-integration-worker", 10, 60) > 0) {
+        // drain the queued oscillation intents so the copy converges
+      }
+      const oscillatingConverged = await database
+        .selectFrom("projections")
+        .select(["id", "generation", "destination_event_id", "status"])
+        .where("id", "=", oscillatingProjection.id)
+        .executeTakeFirstOrThrow();
+      expect(oscillatingConverged.status).toBe("converged");
+      const managedCopyEventId = oscillatingConverged.destination_event_id;
+      if (!managedCopyEventId) {
+        throw new Error("converged oscillating projection is missing its destination event");
+      }
+
+      const storedPolicy = await database
+        .selectFrom("sync_policies")
+        .select(["policy_document"])
+        .where("id", "=", activated.id)
+        .executeTakeFirstOrThrow();
+      // Activation stored the explicit default rather than an implicit choice.
+      expect((storedPolicy.policy_document as Record<string, unknown>)["destination_edits"])
+        .toEqual({ version: 1, on_edit: "restore_and_notify", on_delete: "restore_and_notify" });
+      await database
+        .updateTable("sync_policies")
+        .set({
+          policy_document: {
+            ...(storedPolicy.policy_document as object),
+            destination_edits: {
+              version: 1,
+              on_edit: "hold_for_review",
+              on_delete: "hold_for_review"
+            }
+          },
+          updated_at: new Date()
+        })
+        .where("id", "=", activated.id)
+        .executeTakeFirstOrThrow();
+
+      fakeProvider.simulateManualEdit(
+        "destination-primary",
+        managedCopyEventId,
+        (event) => ({ ...event, summary: "Moved by hand on the work calendar" })
+      );
+      await ageProjectionVerification(database, oscillatingConverged.id);
+      const holdSummary = await verifier.verifyBatch(ORGANIZATION_ID, 100, new Date());
+      expect(holdSummary).toMatchObject({ claimed: 1, repairsScheduled: 0, held: 1 });
+      const heldEdit = await database
+        .selectFrom("projections")
+        .select(["status", "ownership", "recovery_operation", "safe_error_code"])
+        .where("id", "=", oscillatingConverged.id)
+        .executeTakeFirstOrThrow();
+      expect(heldEdit).toEqual({
+        status: "held",
+        ownership: "attached",
+        recovery_operation: "update",
+        safe_error_code: "destination_edit_held"
+      });
+      // The person's direct change stays on the destination while held.
+      expect(fakeProvider.desired("destination-primary", managedCopyEventId)?.summary)
+        .toBe("Moved by hand on the work calendar");
+
+      const notices = new NoticeService(database, sharedPolicyRuntime);
+      const heldNotice = (await notices.list(ORGANIZATION_ID))
+        .find((notice) => notice.kind === "copy_edit_held");
+      if (!heldNotice) {
+        throw new Error("hold_for_review did not record a copy_edit_held notice");
+      }
+      expect(heldNotice).toMatchObject({
+        status: "unread",
+        requires_decision: true,
+        policy_id: activated.id,
+        projection_id: oscillatingConverged.id,
+        destination_calendar: "Work"
+      });
+      expect(heldNotice.detail).toMatchObject({ observed: "drifted", copy_summary: "Busy" });
+
+      // Safety reconciliation refreshes recovery evidence but must not release
+      // the hold or write to the destination.
+      const heldEditReconcile = await reconciler.reconcile(ORGANIZATION_ID, activated.id);
+      expect(heldEditReconcile.effectsCreated).toBe(0);
+      expect(heldEditReconcile.counts).toMatchObject({ "held:none:recovery_shadow_refreshed": 1 });
+      await expect(database
+        .selectFrom("projections")
+        .select(["status", "ownership", "safe_error_code"])
+        .where("id", "=", oscillatingConverged.id)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+          status: "held",
+          ownership: "attached",
+          safe_error_code: "destination_edit_held"
+        });
+      expect(fakeProvider.desired("destination-primary", managedCopyEventId)?.summary)
+        .toBe("Moved by hand on the work calendar");
+
+      await notices.acknowledge(ORGANIZATION_ID, heldNotice.id);
+      await notices.resolve(ORGANIZATION_ID, PRINCIPAL_ID, heldNotice.id, "restore");
+      const restoreEffect = await database
+        .selectFrom("outbox_effects")
+        .select(["operation", "state", "ambiguous"])
+        .where("projection_id", "=", oscillatingConverged.id)
+        .where("state", "=", "pending")
+        .executeTakeFirstOrThrow();
+      expect(restoreEffect).toEqual({ operation: "update", state: "pending", ambiguous: true });
+      expect(await effects.runBatch("postgres-integration-worker", 10, 60)).toBe(1);
+      expect(fakeProvider.desired("destination-primary", managedCopyEventId)?.summary).toBe("Busy");
+      await expect(database
+        .selectFrom("projections")
+        .select(["status", "ownership", "safe_error_code"])
+        .where("id", "=", oscillatingConverged.id)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+          status: "converged",
+          ownership: "attached",
+          safe_error_code: null
+        });
+      expect((await notices.list(ORGANIZATION_ID, "all"))
+        .find((notice) => notice.id === heldNotice.id))
+        .toMatchObject({ status: "resolved", resolution: "restore", requires_decision: false });
+
+      // Deleting the copy under hold_for_review holds too, and keep_and_detach
+      // honors the person's deletion by releasing the copy from management.
+      fakeProvider.simulateManualDelete("destination-primary", managedCopyEventId);
+      await ageProjectionVerification(database, oscillatingConverged.id);
+      const deleteHoldSummary = await verifier.verifyBatch(ORGANIZATION_ID, 100, new Date());
+      expect(deleteHoldSummary).toMatchObject({ claimed: 1, repairsScheduled: 0, held: 1 });
+      await expect(database
+        .selectFrom("projections")
+        .select(["status", "ownership", "recovery_operation", "safe_error_code"])
+        .where("id", "=", oscillatingConverged.id)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+          status: "held",
+          ownership: "attached",
+          recovery_operation: "create",
+          safe_error_code: "destination_delete_held"
+        });
+      const deleteNotice = (await notices.list(ORGANIZATION_ID))
+        .find((notice) => notice.kind === "copy_delete_held");
+      if (!deleteNotice) {
+        throw new Error("hold_for_review did not record a copy_delete_held notice");
+      }
+      expect(deleteNotice).toMatchObject({ requires_decision: true });
+      await notices.resolve(ORGANIZATION_ID, PRINCIPAL_ID, deleteNotice.id, "keep_and_detach");
+      await expect(database
+        .selectFrom("projections")
+        .select(["status", "ownership", "recovery_operation", "safe_error_code"])
+        .where("id", "=", oscillatingConverged.id)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+          status: "converged",
+          ownership: "detached",
+          recovery_operation: null,
+          safe_error_code: null
+        });
+      const detachedReconcile = await reconciler.reconcile(ORGANIZATION_ID, activated.id);
+      expect(detachedReconcile.effectsCreated).toBe(0);
+      await expect(fakeProvider.getEvent(destinationToken, "destination-primary", managedCopyEventId))
+        .resolves.toBeNull();
+      await expect(notices.resolve(ORGANIZATION_ID, PRINCIPAL_ID, deleteNotice.id, "restore"))
+        .rejects.toMatchObject({ code: "notice_not_resolvable" });
     } finally {
       await database?.destroy().catch(() => undefined);
       if (schemaCreated) {

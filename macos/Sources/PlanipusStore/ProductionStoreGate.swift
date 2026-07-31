@@ -16,7 +16,7 @@ public enum EncryptedStoreError: Error, Equatable, Sendable {
 /// Keychain actor boundary. There is no initializer that accepts an unkeyed
 /// SQLite connection and no in-memory fallback.
 public actor EncryptedPlanipusRepository: PlanipusRepository {
-    public static let currentSchemaVersion = 5
+    public static let currentSchemaVersion = 6
 
     public nonisolated let databaseURL: URL
     private let database: DatabaseQueue
@@ -395,8 +395,9 @@ public actor EncryptedPlanipusRepository: PlanipusRepository {
                     INSERT INTO projections (
                         policy_id, source_event_id, source_occurrence_key,
                         destination_provider, destination_account_id, destination_calendar_id,
-                        destination_event_id, desired_fingerprint, provider_revision, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        destination_event_id, desired_fingerprint, provider_revision,
+                        hold_code, detached, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(policy_id, source_event_id, source_occurrence_key)
                     DO UPDATE SET
                         destination_provider = excluded.destination_provider,
@@ -405,6 +406,8 @@ public actor EncryptedPlanipusRepository: PlanipusRepository {
                         destination_event_id = excluded.destination_event_id,
                         desired_fingerprint = excluded.desired_fingerprint,
                         provider_revision = excluded.provider_revision,
+                        hold_code = excluded.hold_code,
+                        detached = excluded.detached,
                         updated_at = excluded.updated_at
                     """,
                 arguments: [
@@ -417,6 +420,8 @@ public actor EncryptedPlanipusRepository: PlanipusRepository {
                     projection.destinationEventID,
                     projection.desiredFingerprint,
                     projection.providerRevision,
+                    projection.hold?.rawValue,
+                    projection.detached,
                     projection.updatedAt.timeIntervalSince1970,
                 ]
             )
@@ -431,6 +436,86 @@ public actor EncryptedPlanipusRepository: PlanipusRepository {
                     WHERE policy_id = ? AND source_event_id = ? AND source_occurrence_key = ?
                     """,
                 arguments: [key.policyID, key.sourceEventID, Self.occurrenceKey(key.sourceOccurrenceID)]
+            )
+        }
+    }
+
+    public func recordNotice(_ notice: SyncNotice) throws {
+        try database.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO sync_notices (
+                        id, policy_id, source_event_id, source_occurrence_key,
+                        kind, status, resolution, copy_summary, copy_start, copy_end,
+                        copy_all_day, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                arguments: [
+                    notice.id.uuidString,
+                    notice.projectionKey.policyID,
+                    notice.projectionKey.sourceEventID,
+                    Self.occurrenceKey(notice.projectionKey.sourceOccurrenceID),
+                    notice.kind.rawValue,
+                    notice.status.rawValue,
+                    notice.resolution?.rawValue,
+                    notice.copySummary,
+                    notice.copyStart.timeIntervalSince1970,
+                    notice.copyEnd.timeIntervalSince1970,
+                    notice.copyIsAllDay,
+                    notice.createdAt.timeIntervalSince1970,
+                    notice.updatedAt.timeIntervalSince1970,
+                ]
+            )
+        }
+    }
+
+    public func notices(includeResolved: Bool) throws -> [SyncNotice] {
+        try database.read { database in
+            let rows = includeResolved
+                ? try Row.fetchAll(
+                    database,
+                    sql: "SELECT * FROM sync_notices ORDER BY created_at, id"
+                )
+                : try Row.fetchAll(
+                    database,
+                    sql: "SELECT * FROM sync_notices WHERE status <> ? ORDER BY created_at, id",
+                    arguments: [SyncNoticeStatus.resolved.rawValue]
+                )
+            return try rows.map(Self.notice(from:))
+        }
+    }
+
+    public func notice(id: UUID) throws -> SyncNotice? {
+        try database.read { database in
+            guard let row = try Row.fetchOne(
+                database,
+                sql: "SELECT * FROM sync_notices WHERE id = ?",
+                arguments: [id.uuidString]
+            ) else { return nil }
+            return try Self.notice(from: row)
+        }
+    }
+
+    public func updateNotice(_ notice: SyncNotice) throws {
+        try database.write { database in
+            let exists = try Bool.fetchOne(
+                database,
+                sql: "SELECT EXISTS(SELECT 1 FROM sync_notices WHERE id = ?)",
+                arguments: [notice.id.uuidString]
+            ) ?? false
+            guard exists else { throw RepositoryError.unknownNotice }
+            try database.execute(
+                sql: """
+                    UPDATE sync_notices
+                    SET status = ?, resolution = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                arguments: [
+                    notice.status.rawValue,
+                    notice.resolution?.rawValue,
+                    notice.updatedAt.timeIntervalSince1970,
+                    notice.id.uuidString,
+                ]
             )
         }
     }
@@ -757,6 +842,39 @@ public actor EncryptedPlanipusRepository: PlanipusRepository {
                 """)
             try database.execute(
                 sql: "UPDATE store_metadata SET value = ? WHERE key = 'schema_version'",
+                arguments: [5]
+            )
+        }
+        migrator.registerMigration("006_destination_edit_notices") { database in
+            try database.execute(sql: "ALTER TABLE projections ADD COLUMN hold_code TEXT")
+            try database.execute(
+                sql: "ALTER TABLE projections ADD COLUMN detached INTEGER NOT NULL DEFAULT 0"
+            )
+            try database.execute(sql: """
+                CREATE TABLE sync_notices (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    policy_id TEXT NOT NULL,
+                    source_event_id TEXT NOT NULL,
+                    source_occurrence_key TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN (
+                        'copy_edit_reverted', 'copy_delete_restored',
+                        'copy_edit_held', 'copy_delete_held'
+                    )),
+                    status TEXT NOT NULL CHECK (status IN ('unread', 'acknowledged', 'resolved')),
+                    resolution TEXT CHECK (resolution IN ('restore', 'keep_and_detach')),
+                    copy_summary TEXT NOT NULL,
+                    copy_start REAL NOT NULL,
+                    copy_end REAL NOT NULL,
+                    copy_all_day INTEGER NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX sync_notices_open ON sync_notices (status, created_at)
+                """)
+            try database.execute(
+                sql: "UPDATE store_metadata SET value = ? WHERE key = 'schema_version'",
                 arguments: [currentSchemaVersion]
             )
         }
@@ -801,6 +919,16 @@ public actor EncryptedPlanipusRepository: PlanipusRepository {
         let accountID: String = row["destination_account_id"]
         let calendarID: String = row["destination_calendar_id"]
         let updatedAt: Double = row["updated_at"]
+        let holdCode: String? = row["hold_code"]
+        let hold: DestinationEditHold?
+        if let holdCode {
+            guard let known = DestinationEditHold(rawValue: holdCode) else {
+                throw EncryptedStoreError.corruptRecord
+            }
+            hold = known
+        } else {
+            hold = nil
+        }
         return StoredProjection(
             key: ProjectionKey(
                 policyID: row["policy_id"],
@@ -815,6 +943,51 @@ public actor EncryptedPlanipusRepository: PlanipusRepository {
             destinationEventID: row["destination_event_id"],
             desiredFingerprint: row["desired_fingerprint"],
             providerRevision: row["provider_revision"],
+            hold: hold,
+            detached: row["detached"],
+            updatedAt: Date(timeIntervalSince1970: updatedAt)
+        )
+    }
+
+    private static func notice(from row: Row) throws -> SyncNotice {
+        let idString: String = row["id"]
+        let kindString: String = row["kind"]
+        let statusString: String = row["status"]
+        let resolutionString: String? = row["resolution"]
+        guard let id = UUID(uuidString: idString),
+              let kind = SyncNoticeKind(rawValue: kindString),
+              let status = SyncNoticeStatus(rawValue: statusString)
+        else {
+            throw EncryptedStoreError.corruptRecord
+        }
+        let resolution: SyncNoticeResolution?
+        if let resolutionString {
+            guard let known = SyncNoticeResolution(rawValue: resolutionString) else {
+                throw EncryptedStoreError.corruptRecord
+            }
+            resolution = known
+        } else {
+            resolution = nil
+        }
+        let copyStart: Double = row["copy_start"]
+        let copyEnd: Double = row["copy_end"]
+        let createdAt: Double = row["created_at"]
+        let updatedAt: Double = row["updated_at"]
+        return SyncNotice(
+            id: id,
+            projectionKey: ProjectionKey(
+                policyID: row["policy_id"],
+                sourceEventID: row["source_event_id"],
+                sourceOccurrenceID: try occurrenceID(from: row["source_occurrence_key"])
+            ),
+            kind: kind,
+            status: status,
+            resolution: resolution,
+            copySummary: row["copy_summary"],
+            copyStart: Date(timeIntervalSince1970: copyStart),
+            copyEnd: Date(timeIntervalSince1970: copyEnd),
+            copyIsAllDay: row["copy_all_day"],
+            createdAt: Date(timeIntervalSince1970: createdAt),
             updatedAt: Date(timeIntervalSince1970: updatedAt)
         )
     }

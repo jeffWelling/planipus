@@ -13,7 +13,8 @@ import type {
   Preview,
   PreviewRequest,
   Session,
-  StatusTone
+  StatusTone,
+  SyncNotice
 } from "./types.js";
 
 type Screen = "overview" | "notifications" | "calendars" | "bridges" | "private" | "protect" | "meetings" | "settings";
@@ -362,6 +363,94 @@ function BridgeCard({
   );
 }
 
+const noticeHeadline: Record<SyncNotice["kind"], string> = {
+  copy_edit_reverted: "A mirrored copy was edited directly — Planipus put it back",
+  copy_delete_restored: "A mirrored copy was deleted directly — Planipus restored it",
+  copy_edit_held: "A mirrored copy was edited directly — waiting for your decision",
+  copy_delete_held: "A mirrored copy was deleted directly — waiting for your decision"
+};
+
+function noticeExplanation(notice: SyncNotice): string {
+  switch (notice.kind) {
+    case "copy_edit_reverted":
+      return "The change happened on the copy, so the original event never moved and no attendee was told. Planipus restored the copy. To really reschedule, edit the original event on its own calendar.";
+    case "copy_delete_restored":
+      return "Only the copy was deleted; the original event still exists. Planipus recreated the copy so the time stays blocked. To remove it for good, exclude or delete the original event.";
+    case "copy_edit_held":
+      return "Planipus has not changed anything on either calendar. The original event is unchanged and no attendee was notified. Choose whether to restore the copy or keep your change.";
+    case "copy_delete_held":
+      return "Planipus has not recreated the copy. The original event still exists and blocks no time on this calendar until you decide.";
+  }
+}
+
+function noticeWhen(notice: SyncNotice): string | undefined {
+  if (!notice.copyStartAt) return undefined;
+  if (notice.copyAllDay) return `All day, ${notice.copyStartAt}`;
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" })
+    .format(new Date(notice.copyStartAt));
+}
+
+function NoticeCard({ notice, runAction }: { notice: SyncNotice; runAction: ActionRunner }) {
+  const held = notice.requiresDecision;
+  return (
+    <article className={held ? "notice-card notice-card--held" : "notice-card"}>
+      <div className="notice-card__body">
+        <b>{noticeHeadline[notice.kind]}</b>
+        <p className="subtle">
+          {[notice.copySummary, noticeWhen(notice), notice.destinationCalendar, notice.policyName]
+            .filter(Boolean)
+            .join(" · ")}
+        </p>
+        <p>{noticeExplanation(notice)}</p>
+      </div>
+      <div className="notice-card__actions">
+        {held ? (
+          <>
+            <button
+              className="button button--primary"
+              onClick={() => runAction(() => api.resolveNotice(notice.id, "restore"))}
+            >
+              Restore the copy
+            </button>
+            <button
+              className="button button--secondary"
+              onClick={() => runAction(() => api.resolveNotice(notice.id, "keep_and_detach"))}
+            >
+              Keep my change, stop managing it
+            </button>
+          </>
+        ) : (
+          <button
+            className="button button--quiet"
+            onClick={() => runAction(() => api.acknowledgeNotice(notice.id))}
+          >
+            Got it
+          </button>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function NoticesSection({ notices, runAction }: { notices: SyncNotice[]; runAction: ActionRunner }) {
+  // Held notices stay until decided; informational ones disappear once read.
+  const visible = notices.filter((notice) => notice.requiresDecision || notice.status === "unread");
+  if (visible.length === 0) return null;
+  return (
+    <section aria-label="Sync notices">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Direct changes to managed copies</p>
+          <h2>Needs a look</h2>
+        </div>
+      </div>
+      <div className="notice-stack">
+        {visible.map((notice) => <NoticeCard key={notice.id} notice={notice} runAction={runAction} />)}
+      </div>
+    </section>
+  );
+}
+
 function EmptyOverview({ onConnect }: { onConnect: () => void }) {
   return (
     <section className="empty-state">
@@ -471,6 +560,7 @@ function ConnectPanel({ onClose }: { onClose: () => void }) {
 
 function OverviewScreen({
   data,
+  notices,
   onConnect,
   onCreate,
   onSync,
@@ -478,6 +568,7 @@ function OverviewScreen({
   runAction
 }: {
   data: Overview;
+  notices: SyncNotice[];
   onConnect: () => void;
   onCreate: () => void;
   onSync: () => void;
@@ -502,6 +593,7 @@ function OverviewScreen({
           {syncPresentationActive ? "Comparing calendars…" : "Sync now"}
         </button>
       </section>
+      <NoticesSection notices={notices} runAction={runAction} />
       <section>
         <div className="section-heading"><div><p className="eyebrow">Calendar boundaries</p><h2>Connected accounts</h2></div><button className="button button--quiet" onClick={onConnect}>Connect another</button></div>
         <div className="connection-grid">{data.connections.map((connection) => <ConnectionCard key={connection.id} connection={connection} />)}</div>
@@ -757,6 +849,7 @@ export function App() {
   const [loadingSession, setLoadingSession] = useState(true);
   const [screen, setScreen] = useState<Screen>("overview");
   const [overview, setOverview] = useState<Overview>();
+  const [notices, setNotices] = useState<SyncNotice[]>([]);
   const [capabilities, setCapabilities] = useState<Capabilities>();
   const [error, setError] = useState<string>();
   const [connectOpen, setConnectOpen] = useState(false);
@@ -779,9 +872,16 @@ export function App() {
   async function refresh(): Promise<void> {
     if (!session?.authenticated) return;
     try {
-      const [value, available] = await Promise.all([api.overview(), api.capabilities()]);
+      // notices() swallows its own failure so a notices outage cannot blank
+      // the overview; overview() and capabilities() still surface theirs.
+      const [value, available, openNotices] = await Promise.all([
+        api.overview(),
+        api.capabilities(),
+        api.notices().catch(() => [])
+      ]);
       setOverview(value);
       setCapabilities(available);
+      setNotices(openNotices);
       setError(undefined);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Overview is unavailable");
@@ -877,7 +977,7 @@ export function App() {
         </header>
         {error ? <div className="error-banner" role="alert"><div><b>Planipus needs attention</b><span>{error}</span></div><button onClick={refresh}>Try again</button></div> : null}
         {overview ? screen === "overview"
-          ? <OverviewScreen data={overview} onConnect={() => setConnectOpen(true)} onCreate={() => setWizardOpen(true)} onSync={runSync} syncPresentationActive={syncPresentationActive} runAction={runAction} />
+          ? <OverviewScreen data={overview} notices={notices} onConnect={() => setConnectOpen(true)} onCreate={() => setWizardOpen(true)} onSync={runSync} syncPresentationActive={syncPresentationActive} runAction={runAction} />
           : <SecondaryScreen screen={screen} data={overview} notifications={notifications} onNavigate={setScreen} onRefresh={() => void refresh()} onConnect={() => setConnectOpen(true)} onCreate={() => setWizardOpen(true)} runAction={runAction} capabilities={capabilities} />
           : <div className="loading-sheet">Reading installation state…</div>}
       </main>

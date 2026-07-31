@@ -274,10 +274,10 @@ For each qualifying source occurrence and policy:
 7. expose per-policy lag, last success, errors, and counts without event details.
 
 Source deletion or exclusion deletes the managed copy. Direct destination-copy
-deletion is recreated on the next reconciliation by default, because the source
-policy remains authoritative; the UI offers `Pause policy`, `Exclude source
-event`, and `Detach copy` so users can express durable intent. Destination edits
-are overwritten unless the copy is explicitly detached. Verification reads the
+edits and deletions follow the policy's destination-edit behavior (next
+section); restoring remains the default because the source policy stays
+authoritative, and the UI offers `Pause policy`, `Exclude source event`, and
+`Detach copy` so users can express durable intent. Verification reads the
 durable destination ID first and restores only when the provider-private policy,
 projection, and generation markers all match. A marker mismatch is held for
 review without a write. Deleted Google copies are replaced under an incremented
@@ -285,6 +285,54 @@ generation and new deterministic event ID; their deleted custom ID is not
 reused, including when deletion races a queued edit repair or follows an
 ambiguous create response. Planipus never writes back from a copy to its source
 in P0.
+
+## Destination-edit behavior
+
+People edit or delete managed copies directly — often by accident, such as
+dragging the copy of a meeting instead of the real invite on the source
+calendar. The cautionary counterexample is the silent-move failure some sync
+products exhibit: the copy moves, the real meeting does not, no attendee is
+notified, and the person believes they rescheduled. Planipus must never let a
+direct copy change silently become the truth, and it never writes from a copy
+back to its source in P0. What is configurable per policy is how loudly the
+divergence is surfaced and whether the person confirms before the copy is
+written again.
+
+The policy field `destination_edits` (versioned; stored explicitly with the
+concrete default when omitted) chooses a mode independently for in-place edits
+(`on_edit`) and deletions (`on_delete`):
+
+1. `restore_and_notify` (default): the next verification pass restores the
+   copy to the policy-transformed source state and records a sync notice, so
+   someone who moved the copy by mistake learns the original meeting did not
+   move and nobody was notified — and can go reschedule the real event.
+2. `restore`: restore silently. This is for people who treat copies as pure
+   projections and do not want notice noise.
+3. `hold_for_review`: leave the copy exactly as the person changed it, hold the
+   projection, and raise a decision notice. The person resolves it with
+   `restore` (re-apply the source-authoritative copy through marker-verified
+   ambiguous recovery, safe even if the copy was deleted meanwhile) or
+   `keep_and_detach` (keep the direct change and detach the copy from
+   management — the durable-intent control above).
+
+Rules:
+
+- restores and holds require every provider-private ownership marker to match
+  the durable projection; a marker mismatch is always held as unknown
+  ownership regardless of mode;
+- a destination-edit hold survives safety reconciliation: a source change
+  refreshes the shadow-evaluated recovery evidence without releasing the hold
+  or touching the destination;
+- notices disclose only what the destination copy already shows (the
+  privacy-transformed summary and timing) plus non-sensitive references — no
+  raw source event fields, matching the audit/log redaction rules;
+- both editions implement the same three modes and hold semantics; the Mac
+  edition records notices in its local encrypted store and resolves them
+  through the coordinator, without any server; and
+- automatic write-back from copy to source, or organizer-visible reschedule
+  proposals, remain out of scope until a dedicated bidirectional contract
+  exists; `hold_for_review` is the safe expression of "my copy edit meant
+  something".
 
 Push notifications reduce latency, but periodic safety reconciliation is
 mandatory because channels expire and notifications can be dropped or
@@ -327,7 +375,9 @@ recorded provider fixtures. It proves:
 - no duplicate or loop across two opposite policies;
 - idempotency under duplicate/out-of-order webhooks and retry after timeout;
 - cursor expiration/full resync and missing notification recovery;
-- destination manual deletion/edit behavior;
+- destination manual deletion/edit behavior in every destination-edit mode,
+  including recorded notices, hold preservation across reconciliation, and
+  explicit restore/keep-and-detach resolution;
 - clean policy removal with previewed managed-copy cleanup;
 - backup/restore followed by reconciliation without duplicate writes; and
 - logs, metrics, audit, exports, and errors contain no disallowed event fields or

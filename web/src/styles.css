@@ -491,3 +491,14 @@ button.pip-mascot:hover { transform: translateY(-2px); background: rgba(255,253,
   .token-creator, .mcp-config--quiet { background: rgba(24,34,30,.48); }
   .mcp-config pre { background: #111916; }
 }
+
+.notice-stack { display: grid; gap: 0.8rem; }
+.notice-card { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; padding: 1.1rem 1.25rem; border: 1px solid var(--rule); border-left: 4px solid var(--sun); border-radius: 4px 12px 12px 4px; background: var(--paper); box-shadow: 0 4px 18px rgba(36,45,41,.035); }
+.notice-card--held { border-left-color: var(--danger); }
+.notice-card__body { display: grid; gap: 0.35rem; max-width: 46rem; }
+.notice-card__body p { margin: 0; font-size: 0.88rem; line-height: 1.5; }
+.notice-card__actions { display: grid; gap: 0.5rem; justify-items: stretch; flex-shrink: 0; }
+@media (max-width: 720px) {
+  .notice-card { flex-direction: column; }
+  .notice-card__actions { width: 100%; }
+}

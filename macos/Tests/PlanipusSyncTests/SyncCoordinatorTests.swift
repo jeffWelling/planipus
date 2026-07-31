@@ -63,7 +63,7 @@ final class SyncCoordinatorTests: XCTestCase {
     }
 
     func testDirectlyDeletedDestinationCopyIsRecreated() async throws {
-        let (coordinator, provider, _) = await system(event: sourceEvent(revision: "rev-1"))
+        let (coordinator, provider, store) = await system(event: sourceEvent(revision: "rev-1"))
         await coordinator.setLifecycle(.online)
         _ = await coordinator.runOnce(policy: policy())
         let initialMutations = await provider.mutations()
@@ -76,6 +76,147 @@ final class SyncCoordinatorTests: XCTestCase {
         _ = await coordinator.runOnce(policy: policy())
         let operations = await provider.mutations().map(\.operation)
         XCTAssertEqual(operations, [.create, .create])
+        // The default destination-edit behavior records a user-facing notice
+        // alongside the restore so the deletion cannot pass silently.
+        let notices = await store.notices(includeResolved: false)
+        XCTAssertEqual(notices.map(\.kind), [.copyDeleteRestored])
+        XCTAssertEqual(notices.first?.status, .unread)
+    }
+
+    func testDirectEditOfManagedCopyIsRestoredWithNotice() async throws {
+        let (coordinator, provider, store) = await system(event: sourceEvent(revision: "rev-1"))
+        await coordinator.setLifecycle(.online)
+        _ = await coordinator.runOnce(policy: policy())
+        let initialMutations = await provider.mutations()
+        let created = try XCTUnwrap(initialMutations.first)
+        await provider.seedDestinationEvent(
+            editedCopy(of: created, title: "Moved by hand on the work calendar"),
+            at: created.destinationEndpoint
+        )
+
+        let status = await coordinator.runOnce(policy: policy())
+        XCTAssertEqual(status.state, .current)
+        let mutations = await provider.mutations()
+        XCTAssertEqual(mutations.map(\.operation), [.create, .update])
+        XCTAssertEqual(mutations.last?.expectedProviderRevision, "user-edit-1")
+        let restored = try await provider.readEvent(
+            at: created.destinationEndpoint,
+            eventID: created.destinationEventID
+        )
+        XCTAssertEqual(restored?.title, "Busy")
+        let notices = await store.notices(includeResolved: false)
+        XCTAssertEqual(notices.map(\.kind), [.copyEditReverted])
+        XCTAssertEqual(notices.first?.status, .unread)
+        XCTAssertEqual(notices.first?.copySummary, "Busy")
+    }
+
+    func testDirectEditHoldsForReviewUntilRestoreDecision() async throws {
+        let holdPolicy = policy(
+            destinationEdits: DestinationEditPolicy(onEdit: .holdForReview, onDelete: .holdForReview)
+        )
+        let (coordinator, provider, store) = await system(event: sourceEvent(revision: "rev-1"))
+        await store.saveAppConfiguration(
+            NativeAppConfiguration(
+                installationID: "installation",
+                bridges: [StoredNativeBridge(
+                    id: holdPolicy.id,
+                    sourceEmail: "personal@example.invalid",
+                    destinationEmail: "work@example.invalid",
+                    hoursSummary: "All times",
+                    policy: holdPolicy
+                )]
+            )
+        )
+        await coordinator.setLifecycle(.online)
+        _ = await coordinator.runOnce(policy: holdPolicy)
+        let initialMutations = await provider.mutations()
+        let created = try XCTUnwrap(initialMutations.first)
+        await provider.seedDestinationEvent(
+            editedCopy(of: created, title: "Moved by hand on the work calendar"),
+            at: created.destinationEndpoint
+        )
+
+        // The person's direct change stays in place; the copy is frozen behind
+        // a decision notice and repeated passes do not duplicate the notice.
+        let heldStatus = await coordinator.runOnce(policy: holdPolicy)
+        _ = await coordinator.runOnce(policy: holdPolicy)
+        XCTAssertEqual(heldStatus.state, .current)
+        let heldMutations = await provider.mutations()
+        XCTAssertEqual(heldMutations.map(\.operation), [.create])
+        let key = ProjectionKey(policyID: "policy", sourceEventID: "event", sourceOccurrenceID: nil)
+        let heldProjectionRow = await store.projection(for: key)
+        let heldProjection = try XCTUnwrap(heldProjectionRow)
+        XCTAssertEqual(heldProjection.hold, .edit)
+        XCTAssertFalse(heldProjection.detached)
+        let stillEdited = try await provider.readEvent(
+            at: created.destinationEndpoint,
+            eventID: created.destinationEventID
+        )
+        XCTAssertEqual(stillEdited?.title, "Moved by hand on the work calendar")
+        let notices = await store.notices(includeResolved: false)
+        XCTAssertEqual(notices.map(\.kind), [.copyEditHeld])
+        let notice = try XCTUnwrap(notices.first)
+
+        try await coordinator.resolveNotice(id: notice.id, action: .restore)
+        let restoredMutations = await provider.mutations()
+        XCTAssertEqual(restoredMutations.map(\.operation), [.create, .update])
+        let restored = try await provider.readEvent(
+            at: created.destinationEndpoint,
+            eventID: created.destinationEventID
+        )
+        XCTAssertEqual(restored?.title, "Busy")
+        let resolvedProjectionRow = await store.projection(for: key)
+        let resolvedProjection = try XCTUnwrap(resolvedProjectionRow)
+        XCTAssertNil(resolvedProjection.hold)
+        let resolvedNoticeRow = await store.notice(id: notice.id)
+        let resolvedNotice = try XCTUnwrap(resolvedNoticeRow)
+        XCTAssertEqual(resolvedNotice.status, .resolved)
+        XCTAssertEqual(resolvedNotice.resolution, .restore)
+    }
+
+    func testDeletedCopyHeldAndKeptDetached() async throws {
+        let holdPolicy = policy(
+            destinationEdits: DestinationEditPolicy(onEdit: .holdForReview, onDelete: .holdForReview)
+        )
+        let (coordinator, provider, store) = await system(event: sourceEvent(revision: "rev-1"))
+        await coordinator.setLifecycle(.online)
+        _ = await coordinator.runOnce(policy: holdPolicy)
+        let initialMutations = await provider.mutations()
+        let created = try XCTUnwrap(initialMutations.first)
+        await provider.removeDestinationEvent(
+            at: created.destinationEndpoint,
+            eventID: created.destinationEventID
+        )
+
+        _ = await coordinator.runOnce(policy: holdPolicy)
+        let heldMutations = await provider.mutations()
+        XCTAssertEqual(heldMutations.map(\.operation), [.create])
+        let key = ProjectionKey(policyID: "policy", sourceEventID: "event", sourceOccurrenceID: nil)
+        let heldProjectionRow = await store.projection(for: key)
+        let heldProjection = try XCTUnwrap(heldProjectionRow)
+        XCTAssertEqual(heldProjection.hold, .delete)
+        let notices = await store.notices(includeResolved: false)
+        XCTAssertEqual(notices.map(\.kind), [.copyDeleteHeld])
+        let notice = try XCTUnwrap(notices.first)
+
+        // Honoring the deletion detaches the copy; it is never recreated.
+        try await coordinator.resolveNotice(id: notice.id, action: .keepAndDetach)
+        let detachedProjectionRow = await store.projection(for: key)
+        let detachedProjection = try XCTUnwrap(detachedProjectionRow)
+        XCTAssertNil(detachedProjection.hold)
+        XCTAssertTrue(detachedProjection.detached)
+        let resolvedNoticeRow = await store.notice(id: notice.id)
+        let resolvedNotice = try XCTUnwrap(resolvedNoticeRow)
+        XCTAssertEqual(resolvedNotice.status, .resolved)
+        XCTAssertEqual(resolvedNotice.resolution, .keepAndDetach)
+        _ = await coordinator.runOnce(policy: holdPolicy)
+        let finalMutations = await provider.mutations()
+        XCTAssertEqual(finalMutations.map(\.operation), [.create])
+        let stillAbsent = try await provider.readEvent(
+            at: created.destinationEndpoint,
+            eventID: created.destinationEventID
+        )
+        XCTAssertNil(stillAbsent)
     }
 
     func testUnownedDestinationCollisionStopsWithoutOverwriting() async throws {
@@ -475,12 +616,17 @@ final class SyncCoordinatorTests: XCTestCase {
         policy(id: "policy")
     }
 
+    private func policy(destinationEdits: DestinationEditPolicy) -> SyncPolicy {
+        policy(id: "policy", destinationEdits: destinationEdits)
+    }
+
     private func policy(
         id: String,
         sourceAccountID: String = "personal-account",
         sourceCalendarID: String = "personal",
         destinationAccountID: String = "employer-account",
-        destinationCalendarID: String = "work"
+        destinationCalendarID: String = "work",
+        destinationEdits: DestinationEditPolicy? = nil
     ) -> SyncPolicy {
         SyncPolicy(
             id: id,
@@ -489,7 +635,25 @@ final class SyncCoordinatorTests: XCTestCase {
             destinationAccountID: destinationAccountID,
             destinationCalendarID: destinationCalendarID,
             hoursMode: .allTimes,
-            hoursProfile: .weekdays(timezoneIdentifier: "UTC")
+            hoursProfile: .weekdays(timezoneIdentifier: "UTC"),
+            destinationEdits: destinationEdits
+        )
+    }
+
+    /// Models a person dragging or retitling the managed copy directly on the
+    /// destination calendar: same event, same ownership markers, new provider
+    /// revision the projection has not recorded.
+    private func editedCopy(of created: ProviderMutation, title: String) -> SourceEvent {
+        SourceEvent(
+            id: created.destinationEventID,
+            calendarID: created.destinationCalendarID,
+            start: Date(timeIntervalSince1970: 1_700_010_000),
+            end: Date(timeIntervalSince1970: 1_700_013_600),
+            title: title,
+            isManagedCopy: true,
+            managedPolicyID: created.policyID,
+            managedProjectionID: created.destinationEventID,
+            providerRevision: "user-edit-1"
         )
     }
 

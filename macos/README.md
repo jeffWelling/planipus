@@ -45,6 +45,11 @@ when this Mac sleeps, loses network access, quits, or is replaced.
 - Destination updates and deletes carry the last observed provider revision as
   `If-Match`. Reads and ambiguous-write recovery verify the managed, policy,
   and projection markers before adopting, changing, or deleting an event.
+- Per-policy destination-edit behavior: a managed copy edited or deleted
+  directly on the destination is restored with a locally stored sync notice by
+  default, restored silently, or held untouched until the person resolves the
+  notice with restore or keep-and-detach. Notices repeat only the copy's
+  privacy-transformed summary and timing.
 - Device-bound, non-synchronizing Data Protection Keychain wrapper.
 - Production SQLCipher database using the SQLCipher-managed GRDB fork. A
   separately generated 32-byte database key is kept as a

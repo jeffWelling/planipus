@@ -461,6 +461,12 @@ opaque free/busy. Reclaim's MCP surface has no analogue for any of these.
 - [~] Ensure closing the main window leaves sync running only when menu-bar app
       remains running; verify Quit fully stops it.
 - [ ] Add optional local notifications with no titles/details/location/attendees.
+- [ ] Server: deliver sync notices by email per `NOTIFICATIONS.md` (settings
+      document, envelope-encrypted SMTP, test-send gate, immediate mode first).
+- [ ] Edition migration per `MIGRATION.md`: `planipus-bridges/v1` schema and
+      fixtures in `conformance/`, Mac passport export/import, Server
+      import/export with fail-closed account mapping and the
+      employer-instance disclosure step, then guided cutover checklists.
 - [ ] Add keyboard, VoiceOver, light/dark, contrast, reduced-motion and zoom tests.
 - [ ] Add timezone/DST/clock-change, offline/stale and identical-name UI tests.
 - [!] Run personal→work live Google end-to-end while app runs.

@@ -52,9 +52,12 @@ inside one application container. Local primary keys are UUIDs; remote provider
 IDs are data, never primary keys. OAuth tokens and the database encryption key
 are Keychain items, never columns.
 
-The current SQLCipher schema is version 5. It physically stores `sync_cursors`,
-`observations`, `change_batches`, `staged_observations`, `projections`,
-`outbox_effects`, `store_metadata`, and one versioned `app_configuration` JSON
+The current SQLCipher schema is version 6. It physically stores `sync_cursors`,
+`observations`, `change_batches`, `staged_observations`, `projections` (with
+destination-edit `hold_code` and `detached` columns), `sync_notices` for
+destination-edit records limited to the privacy-transformed copy
+summary/timing, `outbox_effects`, `store_metadata`, and one versioned
+`app_configuration` JSON
 document for non-secret account/bridge/policy presentation state. Dedicated
 calendar discovery, normalized hours/exception, audit, and health tables remain
 target work. This mapping is intentional and must be migrated—not silently
@@ -351,6 +354,20 @@ execution/repair starts or succeeds.
 Planipus copies are recognized using both projection mappings and provider
 private markers. Copies are never re-ingested recursively. Redacted projections
 must not retain forbidden source details merely for convenience.
+
+### sync_notice (Server migration 0006)
+
+User-facing record of a direct edit or deletion of a managed destination copy,
+created by destination verification according to the policy's
+destination-edit behavior. Fields: organization, policy, projection, kind
+(`copy_edit_reverted`, `copy_delete_restored`, `copy_edit_held`,
+`copy_delete_held`), status (`unread`, `acknowledged`, `resolved`), the chosen
+resolution for held kinds (`restore` or `keep_and_detach`), and a detail
+document limited to the privacy-transformed summary/timing the destination copy
+already discloses. Notices never contain raw source event fields. Held kinds
+carry an open decision while their projection remains an attached
+destination-edit hold; resolution either replays the validated recovery
+evidence as a marker-verified ambiguous intent or detaches the copy.
 
 The authoritative policy semantics are in `CALENDAR-SYNC.md`.
 

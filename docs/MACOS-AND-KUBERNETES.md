@@ -51,7 +51,9 @@ Forbidden architecture:
 - Mac as a thin client for Planipus Server;
 - a “server profile” or server URL in the Mac app;
 - Planipus device credentials, native-auth exchange, or Mac↔server SSE;
-- copying configuration or credentials automatically between editions;
+- copying configuration or credentials automatically between editions
+  (deliberate, human-driven migration via a credential-free export file is
+  planned separately in `MIGRATION.md` and stays within this rule);
 - claiming Kubernetes keeps a Mac-created installation running;
 - bundling any Server service, PostgreSQL, or Valkey inside the Mac app;
 - a LaunchAgent or privileged helper that continues syncing after the user quits;

@@ -23,6 +23,7 @@ import {
 import type { CalendarProvider } from "./providers/types.js";
 import { CalendarSyncCoordinator } from "./sync/coordinator.js";
 import { EffectExecutor } from "./sync/effects.js";
+import { NoticeService } from "./sync/notices.js";
 import { PlanningCoordinator } from "./planning/coordinator.js";
 import { PlanningService } from "./planning/service.js";
 import { ConflictResponseService } from "./conflict-response/service.js";
@@ -35,6 +36,7 @@ export interface ServerRuntime {
   readonly sessions: SessionService;
   readonly apiTokens: ApiTokenService;
   readonly policies: PolicyService;
+  readonly notices: NoticeService;
   readonly googleOAuth?: GoogleOAuthService;
   readonly fakeProvider: FakeCalendarProvider;
   readonly coordinator: CalendarSyncCoordinator;
@@ -119,6 +121,7 @@ export async function createRuntime(
     const sessions = new SessionService(database.db, config);
     const apiTokens = new ApiTokenService(database.db);
     const policies = new PolicyService(database.db, sharedPolicyRuntime);
+    const notices = new NoticeService(database.db, sharedPolicyRuntime);
     const coordinator = new CalendarSyncCoordinator(
       database.db,
       sharedPolicyRuntime,
@@ -164,6 +167,7 @@ export async function createRuntime(
       sessions,
       apiTokens,
       policies,
+      notices,
       ...(providerServices.googleOAuth ? { googleOAuth: providerServices.googleOAuth } : {}),
       fakeProvider,
       coordinator,

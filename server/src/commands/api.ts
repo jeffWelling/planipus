@@ -11,6 +11,7 @@ async function main(): Promise<void> {
     apiTokens: runtime.apiTokens,
     policies: runtime.policies,
     conflictResponses: runtime.conflictResponses,
+    notices: runtime.notices,
     ...(planningProviderWritesEnabled(runtime.config) ? { planning: runtime.planning } : {}),
     ...(runtime.googleOAuth ? { googleOAuth: runtime.googleOAuth } : {})
   });

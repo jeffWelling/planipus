@@ -127,6 +127,42 @@ public enum TentativeBehavior: String, Codable, Sendable {
     case omit
 }
 
+public enum DestinationEditMode: String, Codable, Sendable {
+    case restore
+    case restoreAndNotify = "restore_and_notify"
+    case holdForReview = "hold_for_review"
+}
+
+/// What happens when a person edits or deletes a managed destination copy
+/// directly instead of the authoritative source event. The source stays
+/// authoritative in every mode; a direct copy change never silently becomes
+/// the truth and Planipus never writes from a copy back to its source. The
+/// modes only choose how loudly the divergence is surfaced and whether the
+/// person confirms before the copy is written again.
+public struct DestinationEditPolicy: Codable, Hashable, Sendable {
+    public var version: Int
+    public var onEdit: DestinationEditMode
+    public var onDelete: DestinationEditMode
+
+    public init(
+        version: Int = 1,
+        onEdit: DestinationEditMode = .restoreAndNotify,
+        onDelete: DestinationEditMode = .restoreAndNotify
+    ) {
+        self.version = version
+        self.onEdit = onEdit
+        self.onDelete = onDelete
+    }
+
+    public static let `default` = DestinationEditPolicy()
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case onEdit = "on_edit"
+        case onDelete = "on_delete"
+    }
+}
+
 public struct SyncPolicy: Codable, Hashable, Sendable {
     public var id: String
     public var revision: Int
@@ -153,8 +189,15 @@ public struct SyncPolicy: Codable, Hashable, Sendable {
     public var sourceExclusionMarker: String
     public var manualExcludedSourceEventIDs: Set<String>
     public var skipWhenDestinationInvited: Bool
+    /// Optional so policies stored before this field existed keep decoding;
+    /// use `effectiveDestinationEdits` for the concrete behavior.
+    public var destinationEdits: DestinationEditPolicy?
     public var horizonStart: Date?
     public var horizonEnd: Date?
+
+    public var effectiveDestinationEdits: DestinationEditPolicy {
+        destinationEdits ?? .default
+    }
 
     public init(
         id: String,
@@ -182,6 +225,7 @@ public struct SyncPolicy: Codable, Hashable, Sendable {
         sourceExclusionMarker: String = "#nosync",
         manualExcludedSourceEventIDs: Set<String> = [],
         skipWhenDestinationInvited: Bool = true,
+        destinationEdits: DestinationEditPolicy? = nil,
         horizonStart: Date? = nil,
         horizonEnd: Date? = nil
     ) {
@@ -210,6 +254,7 @@ public struct SyncPolicy: Codable, Hashable, Sendable {
         self.sourceExclusionMarker = sourceExclusionMarker
         self.manualExcludedSourceEventIDs = manualExcludedSourceEventIDs
         self.skipWhenDestinationInvited = skipWhenDestinationInvited
+        self.destinationEdits = destinationEdits
         self.horizonStart = horizonStart
         self.horizonEnd = horizonEnd
     }

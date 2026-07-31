@@ -267,6 +267,19 @@ export interface ProviderSubscriptionTable {
   updated_at: GeneratedTimestamp;
 }
 
+export interface SyncNoticeTable {
+  id: string;
+  organization_id: string;
+  policy_id: string;
+  projection_id: string;
+  kind: "copy_edit_reverted" | "copy_delete_restored" | "copy_edit_held" | "copy_delete_held";
+  status: Generated<"unread" | "acknowledged" | "resolved">;
+  resolution: "restore" | "keep_and_detach" | null;
+  detail: Json;
+  created_at: GeneratedTimestamp;
+  updated_at: GeneratedTimestamp;
+}
+
 export interface AuditFactTable {
   id: string;
   organization_id: string;
@@ -441,6 +454,7 @@ export interface DatabaseSchema {
   outbox_effects: OutboxEffectTable;
   scheduled_jobs: ScheduledJobTable;
   provider_subscriptions: ProviderSubscriptionTable;
+  sync_notices: SyncNoticeTable;
   audit_facts: AuditFactTable;
   planning_previews: PlanningPreviewTable;
   planning_rules: PlanningRuleTable;
