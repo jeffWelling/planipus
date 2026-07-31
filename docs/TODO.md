@@ -194,6 +194,139 @@ not turn an unfinished bridge into a release.
 - [ ] Keep every part Server-only. A Mac version needs separate native product,
       security, provider, lifecycle and release acceptance.
 
+## S1M — MCP surface completeness (competitor review, 2026-07-31)
+
+Context for a cold session. Reclaim.ai publishes **no official MCP server**. Two
+unofficial community wrappers exist over its public REST API: `jj3ny/reclaim-mcp-server`
+(13 tools, task-only) and `universalamateur/reclaim-mcp-server` (40 tools). The 40-tool
+surface breaks down as tasks 12, smart habits 14, calendar events 5, focus time 5,
+analytics 2, utility 2. Both are explicitly unaffiliated with Reclaim. This review
+compared that surface to `mcp/src/server.ts`, which registers **17 tools and 6
+resources**: 6 read, 2 propose, 9 apply.
+
+The comparison's principal finding is that 33 of Reclaim's 40 tools drive product
+features Planipus does not have and has decided not to build, so tool-count parity is
+not a meaningful target. The useful measure is parity between the MCP surface and
+Planipus's **own** API, which is the `PARITY_DEBT` gate in `SURFACES.md`. Track A is
+that work and is implementable now. Track B records the Reclaim features that would
+each require a product decision and an underlying domain before any MCP tool could
+exist. Behaviour was observed from public documentation only; no competitor code was
+read, adapted or derived, per `CLEAN-ROOM-POLICY.md`.
+
+### Track A — close the MCP-to-own-API gap
+
+- [ ] **A1. Add a `whoami` tool** wrapping `GET /api/v1/auth/context`
+      (`server/src/api/app.ts:364`, `protectedRead`, already bearer-reachable).
+      Returns `actor_kind`, `principal_id`, `organization_id`, `scopes`. This is the
+      functional equivalent of Reclaim's `verify_connection` and is the single most
+      valuable missing tool: today an agent cannot discover which scopes its own token
+      holds and only finds out at 403 time. Register with `READ_ANNOTATIONS`.
+- [ ] **A2. Add a `recover_policy` tool** wrapping the bridge recovery route. This is
+      the only apply-scoped API route with no MCP tool. Use `rule_id`-style input
+      schema, `APPLY_ANNOTATIONS` with `idempotentHint: false` (recovery is
+      read-before-write and not safely repeatable).
+- [ ] **A3. Expose the six read documents as tools as well as resources.** Today
+      `capabilities` and `overview` are reachable only as MCP *resources*
+      (`mcp/src/server.ts:272-292`). Client support for resources is uneven and several
+      major hosts surface tools only, so an agent on those hosts cannot read
+      capabilities at all. Add `get_capabilities` and `get_overview` tools; keep the
+      resources for clients that use them. `connections`, `calendars`, `policies` and
+      `conflict-response-rules` already have tool equivalents.
+- [ ] **A4. Fix the `reconcile_policy` annotation contradiction.** It is registered
+      with `idempotentHint: false` while its own description says the operation is
+      idempotent. Reconcile enqueues a job under a stable dedupe key
+      (`server/src/jobs/queue.ts:51`, `onConflict doNothing`), so it *is* idempotent.
+      Correct the annotation, not the description.
+- [ ] **A5. `preview_conflict_response_rule` leaks private busy times into model
+      context — treat as a defect, not a nicety.** It carries
+      `OPEN_WORLD_PROPOSE_ANNOTATIONS` with `destructiveHint: false`
+      (`mcp/src/server.ts:148-157`) and is registered *unconditionally*, outside the
+      `applyEnabled` branch, so a deliberately read-only MCP deployment still exposes
+      it. The response carries real `{start_at, end_at}` pairs for up to three
+      conflicted invitations (`server/src/conflict-response/engine.ts:120-123`) and
+      fans free/busy queries across up to 32 calendars. Hosts commonly auto-approve
+      tools annotated non-destructive. Fix: gate registration behind propose scope
+      explicitly, and reduce the preview payload to counts plus reason codes with no
+      instants, consistent with the ADR-006 capability ceiling.
+- [ ] **A6. Add scope-filtered `tools/list`.** The adapter advertises all nine apply
+      tools to a read-only token and fails only at call time. Once A1 exists, query
+      `auth.context` at startup and register only the tools the presenting credential
+      can actually invoke, or annotate the rest as unavailable with the reason. This
+      is the behaviour `SURFACES.md` §4 specifies for the CLI's `explain`; the two
+      surfaces should agree.
+- [ ] **A7. Add an annotation conformance test.** Assert for every registered tool that
+      `readOnlyHint == !mutating`, `destructiveHint == destructive`,
+      `idempotentHint == idempotent` and `openWorldHint == contacts_provider`, sourced
+      from one table. A4 and A5 are both instances of hand-maintained annotations
+      drifting from behaviour; a test stops the third.
+- [ ] **A8. Record the MCP tool set in `registry/v1/operations.json`** once that
+      registry exists, so `PARITY_DEBT` covers MCP rather than this section doing so by
+      hand. Supersedes A1–A3 as the enforcement mechanism; those remain the immediate
+      fixes.
+
+### Track A blocked — needs the route promotion first
+
+- [ ] **A9. Planning tools (Protect and Meet) cannot exist yet.** All ten planning
+      routes are `protectedMutation`/`requireSession` and hard-reject bearer tokens
+      (`app.ts:526-586`), so no MCP tool can reach them. Blocked on the
+      `SESSION_ONLY_WEB_OPS` promotion in `SURFACES.md` §9 decision 1, which is an open
+      owner decision. When unblocked, add: `list_planning_rules`,
+      `preview_planning_rule`, `activate_planning_rule`, `pause_planning_rule`,
+      `resume_planning_rule`, `replan_planning_rule`, `remove_planning_rule`,
+      `list_suggestions`, `accept_suggestion`, `dismiss_suggestion`.
+- [ ] **A10. `trigger_sync` cannot exist yet.** `POST /api/v1/sync` (`app.ts:806`) is
+      session-only. Note when promoting it that it deliberately defeats job dedupe for
+      planning and conflict-response by suffixing the key with
+      `manual-sync:${Date.now()}` (`app.ts:852,869`), so an MCP retry after a timeout
+      would enqueue duplicate conflict-response reconciliations. Fix the dedupe key
+      before exposing this tool, not after.
+
+### Track B — Reclaim capabilities with no Planipus equivalent
+
+Each requires a product domain that does not exist, and in three cases reverses a
+recorded decision. None is scheduled. Listed so the gap is explicit rather than
+rediscovered.
+
+- [ ] **B1. Tasks (12 Reclaim tools).** `list_tasks`, `list_completed_tasks`,
+      `get_task`, `create_task`, `update_task`, `mark_task_complete`, `delete_task`,
+      `add_time_to_task`, `start_task`, `stop_task`, `prioritize_task`, `restart_task`.
+      Planipus has no task concept. `PRODUCT.md` lists tasks as "planned parity"
+      (specification only). `PLAN-NEXT-2026-07-30.md` §7 refuses time-tracking and
+      billable classification, because they require persisting classified event content
+      over time — the discipline the no-copy domain exists to avoid. **Owner decision
+      required before any of this is scheduled.**
+- [ ] **B2. Smart habits (14 Reclaim tools).** No habit concept exists in any Planipus
+      scope, active or planned-parity. Would need a recurring-intent domain distinct
+      from both bridges and Smart Meetings.
+- [ ] **B3. Focus time (5 Reclaim tools).** `get_focus_settings`,
+      `update_focus_settings`, `lock_focus_block`, `unlock_focus_block`,
+      `reschedule_focus_block`. Adjacent to the shipped availability-fence machinery but
+      not the same thing: a fence publishes a boundary, a focus block defends
+      contiguous work time and tracks attainment. "Planned parity" in `PRODUCT.md`.
+- [ ] **B4. Analytics (2 Reclaim tools).** `get_user_analytics`, `get_focus_insights`.
+      **Conflicts with a recorded product position:** `PRODUCT.md` commits to reviewing
+      capacity "without productivity scoring people". Reversing that is a deliberate
+      product decision, not a backlog item.
+- [ ] **B5. Calendar event read, move and RSVP (5 Reclaim tools).** `list_events`,
+      `list_personal_events`, `get_event`, `set_event_rsvp`, `move_event`.
+      **Conflicts directly with the ADR-006 capability ceiling**, which forbids any
+      Planipus MCP surface from returning event title, description, location, attendee,
+      organiser or conference URL at any scope in any build, and forbids per-event
+      enumeration entirely — because an agent surface that dumps event content is a
+      product-integrity failure for a product whose premise is that some events must
+      stay private. `set_event_rsvp` is partially served, deliberately narrowly, by the
+      no-copy conflict-response rule, which declines only a future timed work invitation
+      still at `needs_action`. `move_event` is partially served by suggest-first Smart
+      Meeting suggestions. Neither should become a general event-mutation tool.
+      **Implementing B5 as specified would reverse ADR-006 and requires a new ADR.**
+
+### Capabilities Planipus's MCP has that Reclaim's does not
+
+Recorded so the comparison is not read as one-directional: directed cross-account
+bridges with versioned privacy presets, field-level disclosure previews before any
+write, marker-verified projection ownership, and no-copy conflict response driven by
+opaque free/busy. Reclaim's MCP surface has no analogue for any of these.
+
 ## S1P — Server Protected Hours and Smart Meetings alpha
 
 - [x] Add PostgreSQL tables/types for planning rules, expiring previews,
