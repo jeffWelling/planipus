@@ -1,5 +1,50 @@
 # Decisions
 
+## 2026-07-31 — One palette, sampled from the mascot
+
+The product carried three palettes that shared no hues. Pip is burnt orange,
+teal and gold outlined in deep teal-navy. The web edition was cream, sage,
+dusty rose and olive ink. The Mac edition was lavender `#735FC7` and mint, and
+its app mark was a lavender gradient. The two editions did not match each other,
+let alone the mascot, so Pip read as a sticker applied after the fact.
+
+The palette is now sampled from the artwork: paper `#FDF6E8`, gold `#F9B233`,
+orange `#F26522`, teal `#1B9AAE`, deep teal `#0E7182`, ink `#123A47`. Cream was
+kept because it is already his — his eye-whites and the card he holds — so only
+the middle four values changed.
+
+Two rules govern the two signal colours and they are not interchangeable.
+Orange means a control you operate. Teal means information derived from opaque
+provider data — free/busy, availability, anything sensed rather than read. The
+web primary button was teal and is now orange, because a teal action would blur
+the single distinction this product exists to make. The neutral is deliberately
+not grey: Pip is outlined in deep teal-navy, so rules and body text inherit that
+hue and the interface belongs to him on screens where he does not appear.
+
+Type is Superclarendon for display, Seravek for body, and a monospaced face with
+tabular figures for times, counts and reason codes. All ship with macOS, so no
+webfont is fetched on either edition and nothing phones home — the same
+constraint that governs every other network decision in the product.
+
+The direction is *Riverbank*, whose signature is disclosure rendered as depth:
+how far a band sits from the surface is its privacy tier, legible without a
+legend. The rejected *Electrosense* direction is adopted for the bridge preview
+screen alone, where showing position and duration with no titles does real
+explanatory work. *Field notebook* was rejected despite being cheapest, because
+it preserved the look that made the mascot feel bolted on.
+
+Tokens are duplicated in `web/src/styles.css` and
+`macos/Sources/PlanipusDesign/PlanipusDesign.swift`. The editions share no build
+step, so a colour change means editing both. That cost is accepted; a shared
+asset pipeline would be the first thread of a shared runtime, which HANDOFF
+rule 3 forbids.
+
+Pip has three jobs — Dock icon, empty states, and the idle/syncing/attention
+status poses. He is not a chat avatar and never narrates. The menu-bar glyph
+stays a monochrome silhouette rather than full-colour Pip, and remains reserved
+as the ADR-006 control-plane indicator, which signals by changing shape rather
+than tint.
+
 ## 2026-07-30 — Corrections to the planning round after independent security review
 
 An independent reviewer re-derived the platform claims by probe and the repo

@@ -13,7 +13,7 @@ struct RootView: View {
                 FirstRunView()
             }
         }
-        .background(PlanipusPalette.warmSurface.ignoresSafeArea())
+        .background(PlanipusPalette.paper.ignoresSafeArea())
         .alert(item: $model.oauthNotice) { notice in
             Alert(
                 title: Text(notice.title),
@@ -48,7 +48,7 @@ private struct FirstRunView: View {
             }
             .padding(44)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(PlanipusPalette.lavenderWash)
+            .background(PlanipusPalette.accentWash)
 
             VStack(alignment: .leading, spacing: 22) {
                 Spacer()
@@ -78,7 +78,7 @@ private struct FirstRunView: View {
                         }
                     }
                     .padding(12)
-                    .background(PlanipusPalette.mintWash, in: RoundedRectangle(cornerRadius: 12))
+                    .background(PlanipusPalette.sensedWash, in: RoundedRectangle(cornerRadius: 12))
                 }
 
                 Picker("This account can be a", selection: $pendingRole) {
@@ -102,7 +102,7 @@ private struct FirstRunView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(PlanipusPalette.lavender)
+                .tint(PlanipusPalette.accent)
                 .controlSize(.large)
                 .disabled(model.isConnectingGoogle)
                 .onChange(of: model.accounts.count) { _, _ in
@@ -117,7 +117,7 @@ private struct FirstRunView: View {
                     model.enterLocalPreview()
                 }
                 .buttonStyle(.link)
-                .foregroundStyle(PlanipusPalette.lavender)
+                .foregroundStyle(PlanipusPalette.accent)
                 Spacer()
             }
             .padding(50)
@@ -236,7 +236,7 @@ private struct OverviewView: View {
                 }
                 .padding(30)
             }
-            .background(PlanipusPalette.warmSurface)
+            .background(PlanipusPalette.paper)
         }
         .sheet(item: $editingBridge) { bridge in
             BridgeEditor(bridge: bridge) { updated in
@@ -273,7 +273,7 @@ private struct OverviewView: View {
         .padding(8)
         .frame(maxWidth: .infinity)
         .background(
-            mascotState == .attention ? PlanipusPalette.warmSurface.opacity(0.8) : Color.clear,
+            mascotState == .attention ? PlanipusPalette.paper.opacity(0.8) : Color.clear,
             in: RoundedRectangle(cornerRadius: 14)
         )
     }
@@ -317,7 +317,7 @@ private struct NotificationDetailsView: View {
                             }
                             .padding(12)
                             .background(
-                                PlanipusPalette.warmSurface,
+                                PlanipusPalette.paper,
                                 in: RoundedRectangle(cornerRadius: 12)
                             )
                         }
@@ -513,7 +513,7 @@ private struct BridgeEditor: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .padding()
-                .background(PlanipusPalette.mintWash, in: RoundedRectangle(cornerRadius: 12))
+                .background(PlanipusPalette.sensedWash, in: RoundedRectangle(cornerRadius: 12))
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
